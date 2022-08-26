@@ -1,0 +1,836 @@
+# Source: https://raw.githubusercontent.com/projectcontour/contour/release-1.5/examples/render/contour.yaml
+# This file is generated from the individual YAML files by generate-deployment.sh. Do not
+# edit this file directly but instead edit the source files and re-render.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: heptio-contour
+  labels:
+    name: heptio-contour
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: contour
+  namespace: heptio-contour
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: ingressroutes.contour.heptio.com
+  labels:
+    component: ingressroute
+spec:
+  conversion:
+    strategy: None
+  group: contour.heptio.com
+  names:
+    kind: IngressRoute
+    listKind: IngressRouteList
+    plural: ingressroutes
+    singular: ingressroute
+  scope: Namespaced
+  versions:
+  - name: v1beta1
+    served: true
+    storage: true
+    additionalPrinterColumns:
+    - jsonPath: .spec.virtualhost.fqdn
+      description: Fully qualified domain name
+      name: FQDN
+      type: string
+    - jsonPath: .spec.virtualhost.tls.secretName
+      description: Secret with TLS credentials
+      name: TLS Secret
+      type: string
+    - jsonPath: .metadata.annotations['kubernetes\.io\/ingress\.class']
+      description: Ingress Class
+      name: CLASS
+      type: string
+    - jsonPath: .spec.routes[0].match
+      description: First routes defined
+      name: First route
+      type: string
+    - jsonPath: .status.currentStatus
+      description: The current status of the HTTPProxy
+      name: Status
+      type: string
+    - jsonPath: .status.description
+      description: Description of the current status
+      name: Status Description
+      type: string
+    subresources:
+      status: {}
+    schema:
+      openAPIV3Schema:
+        description: IngressRoute is an Ingress CRD specificiation
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation
+              of an object. Servers should convert recognized schemas to the latest
+              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this
+              object represents. Servers may infer this from the endpoint the client
+              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: IngressRouteSpec defines the spec of the CRD
+            properties:
+              routes:
+                description: Routes are the ingress routes. If TCPProxy is present,
+                  Routes is ignored.
+                items:
+                  description: Route contains the set of routes for a virtual host
+                  properties:
+                    delegate:
+                      description: Delegate specifies that this route should be delegated
+                        to another IngressRoute
+                      properties:
+                        name:
+                          description: Name of the IngressRoute
+                          type: string
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$ # DNS-1123 subdomain
+                        namespace:
+                          description: Namespace of the IngressRoute. Defaults to the
+                            current namespace if not supplied.
+                          type: string
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ # DNS-1123 label
+                      required:
+                      - name
+                      type: object
+                    enableWebsockets:
+                      description: Enables websocket support for the route
+                      type: boolean
+                    match:
+                      description: Match defines the prefix match
+                      type: string
+                      pattern: ^\/.*$
+                    permitInsecure:
+                      description: Allow this path to respond to insecure requests over
+                        HTTP which are normally not permitted when a `virtualhost.tls`
+                        block is present.
+                      type: boolean
+                    prefixRewrite:
+                      description: Indicates that during forwarding, the matched prefix
+                        (or path) should be swapped with this value
+                      type: string
+                    requestHeadersPolicy:
+                      description: The policy for managing request headers during proxying
+                      properties:
+                        remove:
+                          description: Remove specifies a list of HTTP header names
+                            to remove
+                          items:
+                            type: string
+                          type: array
+                        set:
+                          description: Set specifies a list of HTTP header values that
+                            will be set in the HTTP header
+                          items:
+                            description: HeaderValue represents a header name/value
+                              pair
+                            properties:
+                              name:
+                                description: Name represents a key of a header
+                                minLength: 1
+                                type: string
+                              value:
+                                description: Value represents the value of a header
+                                  specified by a key
+                                minLength: 1
+                                type: string
+                            required:
+                            - name
+                            - value
+                            type: object
+                          type: array
+                      type: object
+                    responseHeadersPolicy:
+                      description: The policy for managing response headers during proxying
+                      properties:
+                        remove:
+                          description: Remove specifies a list of HTTP header names
+                            to remove
+                          items:
+                            type: string
+                          type: array
+                        set:
+                          description: Set specifies a list of HTTP header values that
+                            will be set in the HTTP header
+                          items:
+                            description: HeaderValue represents a header name/value
+                              pair
+                            properties:
+                              name:
+                                description: Name represents a key of a header
+                                minLength: 1
+                                type: string
+                              value:
+                                description: Value represents the value of a header
+                                  specified by a key
+                                minLength: 1
+                                type: string
+                            required:
+                            - name
+                            - value
+                            type: object
+                          type: array
+                      type: object
+                    retryPolicy:
+                      description: The retry policy for this route
+                      properties:
+                        count:
+                          description: NumRetries is maximum allowed number of retries.
+                            If not supplied, the number of retries is one.
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        perTryTimeout:
+                          description: PerTryTimeout specifies the timeout per retry
+                            attempt. Ignored if NumRetries is not supplied.
+                          type: string
+                      type: object
+                    services:
+                      description: Services are the services to proxy traffic
+                      items:
+                        description: Service defines an upstream to proxy traffic to
+                        properties:
+                          healthCheck:
+                            description: HealthCheck defines optional healthchecks on
+                              the upstream service
+                            properties:
+                              healthyThresholdCount:
+                                description: The number of healthy health checks required
+                                  before a host is marked healthy
+                                format: int64
+                                minimum: 0
+                                maximum: 4294967296 # this is a uint32 in Envoy
+                                type: integer
+                              host:
+                                description: The value of the host header in the HTTP
+                                  health check request. If left empty (default value),
+                                  the name "contour-envoy-healthcheck" will be used.
+                                type: string
+                              intervalSeconds:
+                                description: The interval (seconds) between health checks
+                                format: int64
+                                minimum: 0
+                                type: integer
+                              path:
+                                description: HTTP endpoint used to perform health checks
+                                  on upstream service
+                                type: string
+                                pattern: ^\/.*$
+                              timeoutSeconds:
+                                description: The time to wait (seconds) for a health
+                                  check response
+                                format: int64
+                                minimum: 0
+                                type: integer
+                              unhealthyThresholdCount:
+                                description: The number of unhealthy health checks required
+                                  before a host is marked unhealthy
+                                format: int64
+                                minimum: 0
+                                maximum: 4294967296 # this is a uint32 in Envoy
+                                type: integer
+                            required:
+                            - path
+                            type: object
+                          name:
+                            description: Name is the name of Kubernetes service to proxy
+                              traffic. Names defined here will be used to look up corresponding
+                              endpoints which contain the ips to route.
+                            type: string
+                            pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$ # DNS-1035 label
+                          port:
+                            description: Port (defined as Integer) to proxy traffic
+                              to since a service can have multiple defined
+                            type: integer
+                          strategy:
+                            description: LB Algorithm to apply (see https://github.com/projectcontour/contour/blob/master/design/ingressroute-design.md#load-balancing)
+                            type: string
+                            enum:
+                              - RoundRobin
+                              - WeightedLeastRequest
+                              - Random
+                              - RingHash
+                              - Maglev
+                          weight:
+                            description: Weight defines percentage of traffic to balance
+                              traffic
+                            format: int64
+                            minimum: 0
+                            maximum: 4294967296 # uint32 in Envoy
+                            type: integer
+                          perPodMaxConnections:
+                            description: ''
+                            format: int64
+                            minimum: 0
+                            maximum: 4294967296 # uint32 in Envoy
+                            type: integer
+                          perPodMaxPendingRequests:
+                            description: ''
+                            format: int64
+                            minimum: 0
+                            maximum: 4294967296 # uint32 in Envoy
+                            type: integer
+                          perPodMaxRequests:
+                            description: ''
+                            format: int64
+                            minimum: 0
+                            maximum: 4294967296 # uint32 in Envoy
+                            type: integer
+                          idleTimeout:
+                            description: The timeout for idle connections to the upstream service (adobe)
+                            # see route.timeout below for pattern explanation
+                            type: string
+                            pattern: ^[+]?([0-9]*(\.[0-9]*)?[a-z]+)+$
+                          connectTimeout:
+                            description: The timeout to connect to an upstream endpoint
+                            # see route.timeout below for pattern explanation
+                            type: string
+                            pattern: ^[+]?([0-9]*(\.[0-9]*)?[a-z]+)+$
+                        required:
+                        - name
+                        - port
+                        type: object
+                      type: array
+                    timeoutPolicy:
+                      description: The timeout policy for this route
+                      properties:
+                        request:
+                          description: Timeout for receiving a response from the server
+                            after processing a request from client. If not supplied
+                            the timeout duration is undefined.
+                          type: string
+                      type: object
+                    enableSPDY:
+                      description: Enables SPDY protocol upgrade for the route
+                      type: boolean
+                    hashPolicy:
+                      description: Hash policy for sticky sessions support
+                      items:
+                        description: Precisely one of header, cookie, or connectionProperties must be set
+                        oneOf:
+                        - required:
+                          - header
+                        - required:
+                          - cookie
+                        - required:
+                          - connectionProperties
+                        properties:
+                          connectionProperties:
+                            description: Connection properties hash policy
+                            properties:
+                              sourceIp:
+                                description: Hash on source IP address
+                                type: boolean
+                            required:
+                            - sourceIp
+                            type: object
+                          cookie:
+                            description: Cookie hash policy.
+                            properties:
+                              name:
+                                description: The name of the cookie that will be used to obtain the hash key.
+                                  If the cookie is not present and ttl below is not set, no hash will be produced.
+                                type: string
+                              ttl:
+                                description: If specified, a cookie with the TTL will be generated if the cookie is
+                                  not present. If the TTL is present and zero, the generated cookie will be a session cookie.
+                                type: string
+                              path:
+                                description: The name of the path for the cookie. If no path is specified here,
+                                  no path will be set for the cookie.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          header:
+                            description: Header hash policy.
+                            properties:
+                              headerName:
+                                description: The name of the request header that will be used to obtain the
+                                  hash key. If the request header is not present, no hash will be produced.
+                                type: string
+                            required:
+                            - headerName
+                            type: object
+                          terminal:
+                            description: The flag that shortcircuits the hash computing.
+                            type: boolean
+                        type: object
+                      type: array
+                    headerMatch:
+                      description: Headers to match for routing
+                      items:
+                        description: A header condition to match
+                        properties:
+                          contains:
+                            description: Contains specifies a substring that must be present in the header value.
+                            type: string
+                          exact:
+                            description: Exact specifies a string that the header value must be equal to.
+                            type: string
+                          name:
+                            description: Name is the name of the header to match against. Name is required. Header names are case insensitive.
+                            type: string
+                          notcontains:
+                            description: NotContains specifies a substring that must not be present in the header value.
+                            type: string
+                          notexact:
+                            description: NoExact specifies a string that the header value must not be equal to. The condition is true if the header has any other value.
+                            type: string
+                          present:
+                            description: Present specifies that condition is true when the named header is present, regardless of its value. Note that setting Present to false does not make the condition true if the named header is absent.
+                            type: boolean
+                        required:
+                        - name
+                        type: object
+                      type: array
+                    perFilterConfig:
+                      description: The per_filter_config field can be used to provide route-specific configurations for filters (adobe)
+                      properties:
+                        envoy.filters.http.ip_allow_deny:
+                          description: additional allowed/denied IPs beyond embargoed country IPs
+                          properties:
+                            allow_cidrs:
+                              items:
+                                properties:
+                                  address_prefix:
+                                    description: IPv4 or IPv6 address
+                                    type: string
+                                  prefix_len:
+                                    description: Length of prefix
+                                    type: integer
+                                required:
+                                - address_prefix
+                                - prefix_len
+                                type: object
+                              type: array
+                            deny_cidrs:
+                              items:
+                                properties:
+                                  address_prefix:
+                                    description: IPv4 or IPv6 address
+                                    type: string
+                                  prefix_len:
+                                    description: Length of prefix
+                                    type: integer
+                                required:
+                                - address_prefix
+                                - prefix_len
+                                type: object
+                              type: array
+                          type: object
+                        envoy.filters.http.header_size:
+                          description: The limit header size (should be below envoy's hardcoded max of 64KiB)
+                          properties:
+                            header_size:
+                              properties:
+                                max_bytes:
+                                  description: The max header size in bytes
+                                  type: integer
+                              required:
+                              - max_bytes
+                              type: object
+                          required:
+                          - header_size
+                          type: object
+                      type: object
+                    timeout:
+                      description: The time a request in flight can take before envoy returns a 504 (adobe)
+                      type: string
+                      # follow Go's ParseDuration pattern, but no negative number
+                      # https://go.googlesource.com/go/+/refs/tags/go1.14/src/time/format.go#1375
+                      pattern: ^[+]?([0-9]*(\.[0-9]*)?[a-z]+)+$
+                    idleTimeout:
+                      description: The timeout for idle connections to the upstream service (adobe)
+                      type: string
+                      pattern: ^[+]?([0-9]*(\.[0-9]*)?[a-z]+)+$
+                  required:
+                  - match
+                  type: object
+                type: array
+              tcpproxy:
+                description: TCPProxy holds TCP proxy information.
+                properties:
+                  services:
+                    description: Services are the services to proxy traffic
+                    items:
+                      description: Service defines an upstream to proxy traffic to
+                      properties:
+                        healthCheck:
+                          description: HealthCheck defines optional healthchecks on
+                            the upstream service
+                          properties:
+                            healthyThresholdCount:
+                              description: The number of healthy health checks required
+                                before a host is marked healthy
+                              format: int64
+                              minimum: 0
+                              type: integer
+                            host:
+                              description: The value of the host header in the HTTP
+                                health check request. If left empty (default value),
+                                the name "contour-envoy-healthcheck" will be used.
+                              type: string
+                            intervalSeconds:
+                              description: The interval (seconds) between health checks
+                              format: int64
+                              type: integer
+                            path:
+                              description: HTTP endpoint used to perform health checks
+                                on upstream service
+                              type: string
+                            timeoutSeconds:
+                              description: The time to wait (seconds) for a health check
+                                response
+                              format: int64
+                              type: integer
+                            unhealthyThresholdCount:
+                              description: The number of unhealthy health checks required
+                                before a host is marked unhealthy
+                              format: int64
+                              minimum: 0
+                              type: integer
+                          required:
+                          - path
+                          type: object
+                        name:
+                          description: Name is the name of Kubernetes service to proxy
+                            traffic. Names defined here will be used to look up corresponding
+                            endpoints which contain the ips to route.
+                          type: string
+                        port:
+                          description: Port (defined as Integer) to proxy traffic to
+                            since a service can have multiple defined
+                          type: integer
+                        strategy:
+                          description: LB Algorithm to apply (see https://github.com/projectcontour/contour/blob/master/design/ingressroute-design.md#load-balancing)
+                          type: string
+                        validation:
+                          description: UpstreamValidation defines how to verify the
+                            backend service's certificate
+                          properties:
+                            caSecret:
+                              description: Name of the Kubernetes secret be used to
+                                validate the certificate presented by the backend
+                              type: string
+                            subjectName:
+                              description: Key which is expected to be present in the
+                                'subjectAltName' of the presented certificate
+                              type: string
+                          required:
+                          - caSecret
+                          - subjectName
+                          type: object
+                        weight:
+                          description: Weight defines percentage of traffic to balance
+                            traffic
+                          format: int64
+                          minimum: 0
+                          type: integer
+                      required:
+                      - name
+                      - port
+                      type: object
+                    type: array
+                type: object
+              virtualhost:
+                description: Virtualhost appears at most once. If it is present, the
+                  object is considered to be a "root".
+                properties:
+                  fqdn:
+                    description: The fully qualified domain name of the root of the
+                      ingress tree all leaves of the DAG rooted at this object relate
+                      to the fqdn
+                    type: string
+                    pattern: ^(([a-zA-Z0-9]+(-[a-zA-Z0-9]+)*\.)|(\*\.))+[a-z0-9]{2,}|\*$
+                  tls:
+                    description: If present describes tls properties. The SNI names
+                      that will be matched on are described in fqdn, the tls.secretName
+                      secret must contain a matching certificate
+                    properties:
+                      minimumProtocolVersion:
+                        description: Minimum TLS version this vhost should negotiate
+                        type: string
+                      maximumProtocolVersion:
+                        description: Maximum TLS version this vhost should negotiate
+                        type: string
+                      passthrough:
+                        description: If Passthrough is set to true, the SecretName will
+                          be ignored and the encrypted handshake will be passed through
+                          to the backing cluster.
+                        type: boolean
+                      secretName:
+                        description: required, the name of a secret in the current namespace
+                        type: string
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?([\.\/][a-z0-9]([-a-z0-9]*[a-z0-9])?)*$ # name-space/DNS-1123 subdomain
+                      cipherSuites:
+                        description: optional, list of ciphers
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                required:
+                - fqdn
+                type: object
+            type: object
+          status:
+            description: Status reports the current state of the IngressRoute.
+            properties:
+              currentStatus:
+                type: string
+              description:
+                type: string
+              loadBalancer:
+                description: LoadBalancer contains the current status of the load balancer.
+                properties:
+                  ingress:
+                    description: Ingress is a list containing ingress points for the
+                      load-balancer. Traffic intended for the service should be sent
+                      to these ingress points.
+                    items:
+                      description: 'LoadBalancerIngress represents the status of a load-balancer
+                        ingress point: traffic intended for the service should be sent
+                        to an ingress point.'
+                      properties:
+                        hostname:
+                          description: Hostname is set for load-balancer ingress points
+                            that are DNS based (typically AWS load-balancers)
+                          type: string
+                        ip:
+                          description: IP is set for load-balancer ingress points that
+                            are IP based (typically GCE or OpenStack load-balancers)
+                          type: string
+                      type: object
+                    type: array
+                type: object
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: []
+  storedVersions: []
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: tlscertificatedelegations.contour.heptio.com
+  labels:
+    component: tlscertificatedelegation
+spec:
+  conversion:
+    strategy: None
+  group: contour.heptio.com
+  names:
+    kind: TLSCertificateDelegation
+    listKind: TLSCertificateDelegationList
+    plural: tlscertificatedelegations
+    singular: tlscertificatedelegation
+  scope: Namespaced
+  versions:
+  - name: v1beta1
+    schema:
+      openAPIV3Schema:
+        description: TLSCertificateDelegation is an TLS Certificate Delegation CRD specificiation.
+          See design/tls-certificate-delegation.md for details.
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation
+              of an object. Servers should convert recognized schemas to the latest
+              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this
+              object represents. Servers may infer this from the endpoint the client
+              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: TLSCertificateDelegationSpec defines the spec of the CRD
+            properties:
+              delegations:
+                items:
+                  description: CertificateDelegation maps the authority to reference
+                    a secret in the current namespace to a set of namespaces.
+                  properties:
+                    secretName:
+                      description: required, the name of a secret in the current namespace.
+                      type: string
+                    targetNamespaces:
+                      description: required, the namespaces the authority to reference
+                        the the secret will be delegated to. If TargetNamespaces is
+                        nil or empty, the CertificateDelegation' is ignored. If the
+                        TargetNamespace list contains the character, "*" the secret
+                        will be delegated to all namespaces.
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - secretName
+                  - targetNamespaces
+                  type: object
+                type: array
+            required:
+            - delegations
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: []
+  storedVersions: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: heptio-contour
+  name: mtls
+rules:
+- apiGroups: [""]
+  resources:
+  - secrets
+  verbs: # can already list and watch in ClusterRole
+  - create
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mtls
+  namespace: heptio-contour
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mtls
+subjects:
+- kind: ServiceAccount
+  name: contour
+  namespace: heptio-contour
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: contour
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: contour
+subjects:
+- kind: ServiceAccount
+  name: contour
+  namespace: heptio-contour
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: contour
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - endpoints
+  - nodes
+  - pods
+  - secrets
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - "kapcom.adobe.io"
+  resources:
+  - sidecars
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - "networking.k8s.io"
+  resources:
+  - ingresses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - "networking.k8s.io"
+  resources:
+  - "ingresses/status"
+  verbs:
+  - get
+  - list
+  - watch
+  - patch
+  - post
+  - update
+- apiGroups: ["contour.heptio.com"]
+  resources: ["ingressroutes", "tlscertificatedelegations"]
+  verbs:
+  - get
+  - list
+  - watch
+  - put
+  - post
+  - patch
+- apiGroups: ["contour.heptio.com"]
+  resources: ["ingressroutes/status"]
+  verbs:
+  - update
+- apiGroups: ["projectcontour.io"]
+  resources: ["httpproxies", "tlscertificatedelegations"]
+  verbs:
+  - get
+  - list
+  - watch
+  - put
+  - post
+  - patch
+- apiGroups:
+  - "projectcontour.io"
+  resources:
+  - "httpproxies/status"
+  verbs:
+  - update
+- apiGroups: ["networking.x.k8s.io"]
+  resources: ["gatewayclasses", "gateways", "httproutes", "tcproutes"]
+  verbs:
+  - get
+  - list
+  - watch
+  - put
+  - post
+  - patch

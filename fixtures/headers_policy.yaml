@@ -1,0 +1,65 @@
+---
+apiVersion: contour.heptio.com/v1beta1
+kind: IngressRoute
+metadata:
+  labels:
+    velero.io/backup-name: hourly-k8s-backup-20201215190054
+    velero.io/restore-name: hourly-k8s-backup-20201215190054-20201215190627
+  name: hello
+  namespace: laurent
+spec:
+  routes:
+  - hashPolicy: []
+    match: "/"
+    perFilterConfig: {}
+    requestHeadersPolicy:
+      set:
+      - name: x-forwarded-tls-version
+        value: __percent__DOWNSTREAM_TLS_VERSION__percent__
+      - name: x-forwarded-tls-cipher
+        value: __percent__DOWNSTREAM_TLS_CIPHER__percent__
+    responseHeadersPolicy:
+      set:
+      - name: x-envoy-upstream-remote-address
+        value: __percent__UPSTREAM_REMOTE_ADDRESS__percent__
+    retryPolicy:
+      count: 3
+      perTryTimeout: 150ms
+    services:
+    - healthCheck:
+        healthyThresholdCount: 4
+        intervalSeconds: 5
+        path: "/health"
+        timeoutSeconds: 2
+        unhealthyThresholdCount: 3
+      name: hello
+      port: 3000
+  - match: "/node/"
+    prefixRewrite: "/"
+    services:
+    - healthCheck:
+        healthyThresholdCount: 4
+        intervalSeconds: 5
+        path: "/health"
+        timeoutSeconds: 2
+        unhealthyThresholdCount: 3
+      name: hello
+      port: 3001
+  - match: "/http2/"
+    permitInsecure: true
+    prefixRewrite: "/"
+    services:
+    - name: hello2
+      port: 3002
+  - match: "/http2/tls/"
+    prefixRewrite: "/"
+    services:
+    - name: hello2
+      port: 3003
+  virtualhost:
+    fqdn: laurent.corp.ethos01-dev-va6.ethos.adobe.net
+    tls:
+      secretName: heptio-contour/cluster-ssl-corp
+status:
+  currentStatus: valid
+  description: valid IngressRoute

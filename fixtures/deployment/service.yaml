@@ -1,0 +1,46 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello
+  namespace: f4tq
+spec:
+  ports:
+  - name: hellohttp
+    port: 3000
+    protocol: TCP
+    targetPort: 3000
+  - name: nodehttp
+    port: 3001
+    protocol: TCP
+    targetPort: 3001
+  selector:
+    app: hello
+  type: ClusterIP
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    contour.heptio.com/upstream-protocol.h2c: 3002,http
+    contour.heptio.com/upstream-protocol.tls: 3003,https
+  name: hello2
+  namespace: f4tq
+
+spec:
+  ports:
+  - name: http
+    port: 3002
+    protocol: TCP
+    targetPort: 3002
+  - name: https
+    port: 3003
+    protocol: TCP
+    targetPort: 3003
+  selector:
+    app: hello
+  sessionAffinity: None
+  type: ClusterIP
+

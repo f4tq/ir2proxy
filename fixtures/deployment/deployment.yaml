@@ -1,0 +1,83 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+  namespace: f4tq
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hello
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 10%
+    type: RollingUpdate
+  template:
+    metadata:
+      creationTimestamp:
+      labels:
+        app: hello
+      namespace: f4tq
+    spec:
+      containers:
+      - env:
+        - name: SIZE_RESPONSE_LEN
+          value: '10485760'
+        image: dockerlo/hellohttp
+        imagePullPolicy: Always
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - "/bin/sh"
+              - "-c"
+              - sleep 60
+        name: hellohttp
+        ports:
+        - containerPort: 3000
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+
+      - env:
+        - name: PORT
+          value: '3001'
+        image: dockerlo/nodehttp
+        imagePullPolicy: Always
+        name: nodehttp
+        ports:
+        - containerPort: 3001
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+
+      - env:
+        - name: HTTP_PORT
+          value: '3002'
+        - name: HTTPS_PORT
+          value: '3003'
+        image: dockerlo/hellohttp2
+        imagePullPolicy: Always
+        name: hellohttp2
+        ports:
+        - containerPort: 3002
+          protocol: TCP
+        - containerPort: 3003
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 2

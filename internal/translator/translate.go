@@ -15,13 +15,16 @@
 package translator
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
-	irv1beta1 "github.com/projectcontour/contour/apis/contour/v1beta1"
-	hpv1 "github.com/projectcontour/contour/apis/projectcontour/v1"
+	hpv1 "kapcom.adobe.com/contour/v1"
+	irv1beta1 "kapcom.adobe.com/contour/v1beta1"
+	"kapcom.adobe.com/xlate"
+
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -57,7 +60,7 @@ func IngressRouteToHTTPProxy(ir *irv1beta1.IngressRoute) (*hpv1.HTTPProxy, []str
 		includes = append(includes, tcpincludes...)
 		warnings = append(warnings, tcpwarnings...)
 	}
-
+	var vhost *hpv1.VirtualHost
 	if ir.Spec.VirtualHost == nil {
 		routePrefixes := extractPrefixes(ir.Spec.Routes)
 		routeLCP = longestCommonPathPrefix(routePrefixes)
@@ -74,12 +77,23 @@ func IngressRouteToHTTPProxy(ir *irv1beta1.IngressRoute) (*hpv1.HTTPProxy, []str
 			warnings = append(warnings, fmt.Sprintf("The guess for the IngressRoute include path is %s. HTTPProxy prefix conditions should not include the include prefix. Please check this value is correct. See https://projectcontour.io/docs/main/httpproxy/#conditions-and-inclusion", routeLCP))
 		}
 
+	} else {
+		bb, err := json.Marshal(ir.Spec.VirtualHost)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("target virtualhost %s could not be marshalled because: %s", ir.Spec.VirtualHost.Fqdn, err.Error()))
+		} else {
+			vhost = &hpv1.VirtualHost{}
+			err = json.Unmarshal(bb, vhost)
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("target virtualhost %s could not be Unmarshalled because: %s", ir.Spec.VirtualHost.Fqdn, err.Error()))
+				vhost = nil
+			}
+		}
 	}
 
 	routes, routeIncludes, translateWarnings := translateRoutes(ir.Spec.Routes, routeLCP)
 	includes = append(includes, routeIncludes...)
 	warnings = append(warnings, translateWarnings...)
-
 	hp := &hpv1.HTTPProxy{
 		TypeMeta: v1.TypeMeta{
 			Kind:       "HTTPProxy",
@@ -97,7 +111,7 @@ func IngressRouteToHTTPProxy(ir *irv1beta1.IngressRoute) (*hpv1.HTTPProxy, []str
 			Annotations: ir.ObjectMeta.DeepCopy().GetAnnotations(),
 		},
 		Spec: hpv1.HTTPProxySpec{
-			VirtualHost: ir.Spec.VirtualHost,
+			VirtualHost: vhost,
 			Routes:      routes,
 			Includes:    includes,
 			TCPProxy:    tcpproxy,
@@ -131,7 +145,101 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 			Response: irRoute.TimeoutPolicy.Request,
 		}
 	}
+	// Adapt Adobe additions to ingressroute
+	if irRoute.RequestHeadersPolicy != nil {
+		pol := hpv1.HeadersPolicy{}
+		if len(irRoute.RequestHeadersPolicy.Set) > 0 {
+			ss := make([]hpv1.HeaderValue, len(irRoute.RequestHeadersPolicy.Set))
+			for ii, header := range irRoute.RequestHeadersPolicy.Set {
+				ss[ii] = hpv1.HeaderValue{
+					Name:  header.Name,
+					Value: header.Value,
+				}
+			}
+			pol.Set = ss
+		}
+		if len(irRoute.RequestHeadersPolicy.Remove) > 0 {
+			ss := make([]string, len(irRoute.RequestHeadersPolicy.Remove))
+			copy(ss, irRoute.RequestHeadersPolicy.Remove)
+			pol.Remove = ss
 
+		}
+		route.RequestHeadersPolicy = &pol
+	}
+	if len(irRoute.HeaderMatch) > 0 {
+		for _, jj := range irRoute.HeaderMatch {
+			nn := hpv1.Condition{
+			}
+			switch {
+			case jj.Present != nil:
+				nn.Header.Present = *jj.Present
+			case jj.Contains != "":
+				nn.Header = &hpv1.HeaderCondition{
+					Name:     jj.Name,
+					Contains: jj.Contains,
+				}
+			case jj.NotContains != "":
+				nn.Header = &hpv1.HeaderCondition{
+					Name:        jj.Name,
+					NotContains: jj.NotContains,
+				}
+			case jj.Exact != "":
+				nn.Header = &hpv1.HeaderCondition{
+					Name:  jj.Name,
+					Exact: jj.Exact,
+				}
+			case jj.NotExact != "":
+				nn.Header = &hpv1.HeaderCondition{
+					Name:     jj.Name,
+					NotExact: jj.NotExact,
+				}
+			}
+			route.Conditions = append(route.Conditions, nn)
+		}
+	}
+	if irRoute.ResponseHeadersPolicy != nil {
+		pol := hpv1.HeadersPolicy{}
+		if len(irRoute.ResponseHeadersPolicy.Set) > 0 {
+			ss := make([]hpv1.HeaderValue, len(irRoute.ResponseHeadersPolicy.Set))
+			for ii, header := range irRoute.ResponseHeadersPolicy.Set {
+				ss[ii] = hpv1.HeaderValue{
+					Name:  header.Name,
+					Value: header.Value,
+				}
+			}
+			pol.Set = ss
+		}
+		if len(irRoute.ResponseHeadersPolicy.Remove) > 0 {
+			ss := make([]string, len(irRoute.ResponseHeadersPolicy.Remove))
+			copy(ss, irRoute.ResponseHeadersPolicy.Remove)
+			pol.Remove = ss
+		}
+		route.ResponseHeadersPolicy = &pol
+	}
+	if irRoute.PerFilterConfig != nil {
+		ff := &xlate.PerFilterConfig{}
+		if irRoute.PerFilterConfig.HeaderSize != nil {
+			tmp := *irRoute.PerFilterConfig.HeaderSize
+			ff.HeaderSize = &tmp
+		}
+		if irRoute.PerFilterConfig.IpAllowDeny != nil {
+			tmp := xlate.IpAllowDeny{}
+			if len(irRoute.PerFilterConfig.IpAllowDeny.AllowCidrs) > 0 {
+				tmp.AllowCidrs = make([]xlate.Cidr, len(irRoute.PerFilterConfig.IpAllowDeny.AllowCidrs))
+				copy(tmp.AllowCidrs, irRoute.PerFilterConfig.IpAllowDeny.AllowCidrs)
+			}
+			if len(irRoute.PerFilterConfig.IpAllowDeny.DenyCidrs) > 0 {
+				tmp.DenyCidrs = make([]xlate.Cidr, len(irRoute.PerFilterConfig.IpAllowDeny.DenyCidrs))
+				copy(tmp.DenyCidrs, irRoute.PerFilterConfig.IpAllowDeny.DenyCidrs)
+			}
+			ff.IpAllowDeny = &tmp
+		}
+		if irRoute.PerFilterConfig.Authz != nil {
+			tmp := irRoute.PerFilterConfig.Authz.DeepCopy()
+			ff.Authz = tmp
+		}
+		route.PerFilterConfig = ff
+	}
 	if irRoute.PrefixRewrite != "" {
 		route.PathRewritePolicy = &hpv1.PathRewritePolicy{
 			ReplacePrefix: []hpv1.ReplacePrefix{
@@ -141,15 +249,49 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 			},
 		}
 	}
-
+	if irRoute.EnableSPDY {
+		warnings = append(warnings, "ingressroute.EnableSPDY has no equivalent in httpproxy ")
+	}
 	var seenLBStrategy string
 	var seenHealthCheckPolicy *irv1beta1.HealthCheck
 	var seenHealthCheckServiceName string
 	for _, irService := range irRoute.Services {
 
-		service, healthcheckPolicy, lbpolicy := translateService(irService)
+		if irService == nil {
+			continue
+		}
+		if irService.PerPodMaxConnections != 0 {
+			warnings = append(warnings, "httpproxy has no equivalent for ingressroute route.service.perPodMaxConnections")
+		}
+		if irService.PerPodMaxPendingRequests != 0 {
+			warnings = append(warnings, "httpproxy has no equivalent for ingressroute route.service.perPodMaxPendingRequests")
+		}
+		if irService.PerPodMaxRequests != 0 {
+			warnings = append(warnings, "httpproxy has no equivalent for ingressroute route.service.perPodMaxRequests")
+		}
+		if irRoute.IdleTimeout != nil {
+			warnings = append(warnings, "httpproxy has direct equivalent for ingressroute route.service.idleTimeout.  attempting to use route.TimeoutPolicy")
+			dur := irRoute.IdleTimeout.String()	
+			if route.TimeoutPolicy == nil {
+				route.TimeoutPolicy = &hpv1.TimeoutPolicy{
+					Idle: dur,
+				}
+			} else {
+				route.TimeoutPolicy.Idle = dur
+			}
+		}
+		if irService.ConnectTimeout != nil {
+			// TODO: make sure this isn't rep'd as some other var in httpproxy
+			warnings = append(warnings, "httpproxy has no equivalent for ingressroute route.service.connectTimeout")
+		}
 
-		if lbpolicy != nil {
+		service, healthcheckPolicy, lbpolicy := translateService(*irService)
+
+		if lbpolicy != nil {	
+			if irRoute.HashPolicy != nil {
+				warnings = append(warnings,"service has lbpolicy but route 'Cookie' policy in httpproxy for sticksession")
+			}
+		
 			if seenLBStrategy == "" {
 				// Copy the first strategy we encounter into the HP loadbalancerpolicy
 				// and save that we've seen that one.
@@ -160,6 +302,11 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 					warnings = append(warnings, fmt.Sprintf("Strategy %s on Service %s could not be applied, HTTPProxy only supports a single load balancing policy across all services. %s is already applied.", irService.Strategy, irService.Name, seenLBStrategy))
 				}
 			}
+		} else {
+			// See https://projectcontour.io/docs/v1.19.0/config/request-routing/#session-affinity
+			route.LoadBalancerPolicy = &hpv1.LoadBalancerPolicy{ Strategy: "RequestHash"}
+			// however, kapcom ignores Strategy RequestHash and Cookie
+			// See https://git.corp.adobe.com/adobe-platform/kapcom/blob/main/contour/v1/httpproxy_xlate.go#L126
 		}
 
 		if healthcheckPolicy != nil {
@@ -200,7 +347,7 @@ func translateService(irService irv1beta1.Service) (hpv1.Service, *hpv1.HTTPHeal
 		healthcheckPolicy = &hpv1.HTTPHealthCheckPolicy{
 			Path:                    irService.HealthCheck.Path,
 			Host:                    irService.HealthCheck.Host,
-			TimeoutSeconds:          irService.HealthCheck.TimeoutSeconds,
+			TimeoutSeconds:          int64(irService.HealthCheck.TimeoutSeconds),
 			UnhealthyThresholdCount: irService.HealthCheck.UnhealthyThresholdCount,
 			HealthyThresholdCount:   irService.HealthCheck.HealthyThresholdCount,
 		}
@@ -226,18 +373,21 @@ func translateInclude(irRoute irv1beta1.Route) *hpv1.Include {
 	}
 }
 
-func translateRoutes(irRoutes []irv1beta1.Route, routeLCP string) ([]hpv1.Route, []hpv1.Include, []string) {
+func translateRoutes(irRoutes []*irv1beta1.Route, routeLCP string) ([]hpv1.Route, []hpv1.Include, []string) {
 
 	var routes []hpv1.Route
 	var includes []hpv1.Include
 	var warnings []string
 	for _, irRoute := range irRoutes {
-		hpInclude := translateInclude(irRoute)
+		if irRoute == nil {
+			continue
+		}
+		hpInclude := translateInclude(*irRoute)
 		if hpInclude != nil {
 			includes = append(includes, *hpInclude)
 			continue
 		}
-		route, translationWarnings := translateRoute(irRoute, routeLCP)
+		route, translationWarnings := translateRoute(*irRoute, routeLCP)
 		routes = append(routes, route)
 		warnings = append(warnings, translationWarnings...)
 	}
@@ -249,22 +399,25 @@ func translateTCPProxy(irTCPProxy *irv1beta1.TCPProxy) (*hpv1.TCPProxy, []hpv1.I
 
 	var includes []hpv1.Include
 	var warnings []string
-
-	if irTCPProxy.Delegate != nil {
-		if len(irTCPProxy.Services) > 0 {
-			return nil, includes, warnings, errors.New("invalid IngressRoute: Delegate and Services can not both be set")
+	/*
+		if irTCPProxy.Delegate != nil {
+			if len(irTCPProxy.Services) > 0 {
+				return nil, includes, warnings, errors.New("invalid IngressRoute: Delegate and Services can not both be set")
+			}
+			includes = append(includes, hpv1.Include{
+				Name:      irTCPProxy.Delegate.Name,
+				Namespace: irTCPProxy.Delegate.Namespace,
+			})
+			return nil, includes, warnings, nil
 		}
-		includes = append(includes, hpv1.Include{
-			Name:      irTCPProxy.Delegate.Name,
-			Namespace: irTCPProxy.Delegate.Namespace,
-		})
-		return nil, includes, warnings, nil
-	}
-
+	*/
 	proxy := &hpv1.TCPProxy{}
 	for _, irService := range irTCPProxy.Services {
 
-		hpService, healthcheckPolicy, lbpolicy := translateService(irService)
+		if irService == nil {
+			continue
+		}
+		hpService, healthcheckPolicy, lbpolicy := translateService(*irService)
 
 		if healthcheckPolicy != nil {
 			warnings = append(warnings, "Healthcheck policy of TCPProxy service has no effect, discarding")
@@ -278,7 +431,7 @@ func translateTCPProxy(irTCPProxy *irv1beta1.TCPProxy) (*hpv1.TCPProxy, []hpv1.I
 	return proxy, includes, warnings, nil
 }
 
-func extractPrefixes(routes []irv1beta1.Route) []string {
+func extractPrefixes(routes []*irv1beta1.Route) []string {
 
 	var prefixes []string
 	for _, route := range routes {

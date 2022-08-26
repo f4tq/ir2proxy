@@ -16,14 +16,14 @@ package k8sdecoder
 
 import (
 	"fmt"
-
-	irv1beta1 "github.com/projectcontour/contour/apis/contour/v1beta1"
-	contourscheme "github.com/projectcontour/contour/apis/generated/clientset/versioned/scheme"
+	irv1beta1 "kapcom.adobe.com/contour/v1beta1"
+	contourscheme "kapcom.adobe.com/contour/generated/v1/clientset/versioned/scheme"
 	"k8s.io/client-go/kubernetes/scheme"
 )
 
 // DecodeIngressRoute decodes a given byte stream into a IngressRoute or returns an error.
 func DecodeIngressRoute(input []byte) (*irv1beta1.IngressRoute, error) {
+	irv1beta1.AddToScheme(scheme.Scheme)
 	contourscheme.AddToScheme(scheme.Scheme)
 	decode := scheme.Codecs.UniversalDeserializer().Decode
 	ir, groupVersionKind, err := decode(input, nil, nil)

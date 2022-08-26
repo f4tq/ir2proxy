@@ -1,0 +1,22 @@
+{
+  "ingress_classes": {
+    "public": {
+      "ports": {
+        "-http": {
+          "port": 7000,
+          "socket_options": {
+            "so_reuseport": true,
+            "so_priority": 6,
+            "tcp_keepidle": 90,
+            "tcp_keepintvl": 90,
+            "tcp_keepcnt": 3
+          }
+        },
+        "-https": {
+          "port": 7001,
+          "ssl": true
+        }
+      }
+    }
+  }
+}
