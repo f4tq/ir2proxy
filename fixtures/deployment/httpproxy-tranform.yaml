@@ -1,0 +1,107 @@
+# Generated from ingressroute f4tq/hello
+---
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  annotations:
+    kubernetes.io/ingress.class: contour-public
+  name: hello
+  namespace: f4tq
+spec:
+  routes:
+  - adobe:leastRequestLbConfig: null
+    adobe:perFilterConfig:
+      envoy.filters.http.header_size:
+        header_size:
+          max_bytes: 8192
+      envoy.filters.http.ip_allow_deny:
+        allow_cidrs:
+        - address_prefix: 192.150.10.192
+          prefix_len: 27
+    conditions:
+    - prefix: /
+    healthCheckPolicy:
+      healthyThresholdCount: 4
+      intervalSeconds: 0
+      path: /health
+      timeoutSeconds: 2
+      unhealthyThresholdCount: 3
+    loadBalancerPolicy:
+      strategy: RequestHash
+    requestHeadersPolicy:
+      set:
+      - name: x-forwarded-tls-version
+        value: __percent__DOWNSTREAM_TLS_VERSION__percent__
+      - name: x-forwarded-tls-cipher
+        value: __percent__DOWNSTREAM_TLS_CIPHER__percent__
+    responseHeadersPolicy:
+      set:
+      - name: x-envoy-upstream-remote-address
+        value: __percent__UPSTREAM_REMOTE_ADDRESS__percent__
+    services:
+    - name: hello
+      port: 3000
+    timeoutPolicy:
+      idle: 5m0s
+      response: infinity
+  - adobe:leastRequestLbConfig: null
+    conditions:
+    - prefix: /
+    - header:
+        contains: foo=bar
+        name: :path
+    loadBalancerPolicy:
+      strategy: RequestHash
+    pathRewritePolicy:
+      replacePrefix:
+      - replacement: /ping
+    services:
+    - name: hello
+      port: 3000
+  - adobe:leastRequestLbConfig: null
+    conditions:
+    - prefix: /node/
+    - header:
+        exact: GET
+        name: :method
+    healthCheckPolicy:
+      healthyThresholdCount: 4
+      intervalSeconds: 0
+      path: /health
+      timeoutSeconds: 2
+      unhealthyThresholdCount: 3
+    loadBalancerPolicy:
+      strategy: RequestHash
+    pathRewritePolicy:
+      replacePrefix:
+      - replacement: /
+    services:
+    - name: hello
+      port: 3001
+  - adobe:leastRequestLbConfig: null
+    conditions:
+    - prefix: /http2/
+    loadBalancerPolicy:
+      strategy: RequestHash
+    pathRewritePolicy:
+      replacePrefix:
+      - replacement: /
+    services:
+    - name: hello2
+      port: 3002
+  - adobe:leastRequestLbConfig: null
+    conditions:
+    - prefix: /http2/tls/
+    loadBalancerPolicy:
+      strategy: RequestHash
+    pathRewritePolicy:
+      replacePrefix:
+      - replacement: /
+    services:
+    - name: hello2
+      port: 3003
+  virtualhost:
+    fqdn: f4tq.ethos51-dev-va6.ethos.adobe.net
+    tls:
+      secretName: heptio-contour/cluster-ssl-public
+

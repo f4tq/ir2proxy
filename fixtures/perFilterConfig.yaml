@@ -1,0 +1,33 @@
+---
+apiVersion: contour.heptio.com/v1beta1
+kind: IngressRoute
+metadata:
+  labels:
+    kd_created: 'true'
+    kd_environment: dev
+    kd_gitrepo: loc--test_ethos
+    kd_unique_containerid_testethos: 'true'
+    kd_version: b1462f33
+  name: loc--test-ethos-dev-base-route
+  namespace: ns-ethos-0f849988d65ea8248e37bad75d4-dev
+spec:
+  routes:
+  - match: "/"
+    perFilterConfig:
+      envoy.filters.http.header_size:
+        header_size:
+          max_bytes: 12288
+    services:
+    - healthCheck:
+        healthyThresholdCount: 1
+        intervalSeconds: 60
+        path: "/ping"
+        timeoutSeconds: 5
+        unhealthyThresholdCount: 3
+      name: o7eb0d992111a
+      port: 8080
+      weight: 0
+    timeout: 60s
+status:
+  currentStatus: valid
+  description: valid IngressRoute
