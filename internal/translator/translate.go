@@ -169,7 +169,6 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 	if len(irRoute.HeaderMatch) > 0 {
 		for _, jj := range irRoute.HeaderMatch {
 			nn := hpv1.Condition{
-				Prefix: match,
 			}
 			switch {
 			case jj.Present != nil:
@@ -236,9 +235,8 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 			ff.IpAllowDeny = &tmp
 		}
 		if irRoute.PerFilterConfig.Authz != nil {
-			tmp := xlate.ExtAuthzPerRoute{}
-			irRoute.PerFilterConfig.Authz.DeepCopyInto(&tmp)
-			ff.Authz = &tmp
+			tmp := irRoute.PerFilterConfig.Authz.DeepCopy()
+			ff.Authz = tmp
 		}
 		route.PerFilterConfig = ff
 	}
@@ -289,7 +287,11 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 
 		service, healthcheckPolicy, lbpolicy := translateService(*irService)
 
-		if lbpolicy != nil {
+		if lbpolicy != nil {	
+			if irRoute.HashPolicy != nil {
+				warnings = append(warnings,"service has lbpolicy but route 'Cookie' policy in httpproxy for sticksession")
+			}
+		
 			if seenLBStrategy == "" {
 				// Copy the first strategy we encounter into the HP loadbalancerpolicy
 				// and save that we've seen that one.
@@ -300,6 +302,11 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 					warnings = append(warnings, fmt.Sprintf("Strategy %s on Service %s could not be applied, HTTPProxy only supports a single load balancing policy across all services. %s is already applied.", irService.Strategy, irService.Name, seenLBStrategy))
 				}
 			}
+		} else {
+			// See https://projectcontour.io/docs/v1.19.0/config/request-routing/#session-affinity
+			route.LoadBalancerPolicy = &hpv1.LoadBalancerPolicy{ Strategy: "RequestHash"}
+			// however, kapcom ignores Strategy RequestHash and Cookie
+			// See https://git.corp.adobe.com/adobe-platform/kapcom/blob/main/contour/v1/httpproxy_xlate.go#L126
 		}
 
 		if healthcheckPolicy != nil {

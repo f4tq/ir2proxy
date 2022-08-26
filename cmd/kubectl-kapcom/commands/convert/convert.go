@@ -85,6 +85,9 @@ func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []str
 		log.Fatal("--apply has not been implemented yet.  Stay tuned")
 	}
 	ns, err := cmd.Flags().GetString("namespace")
+	if err != nil {
+		return err
+	}
 	if allNs {
 		ns = ""
 		ingressroute = []string{}
@@ -113,13 +116,11 @@ func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []str
 			if err != nil {
 				return fmt.Errorf("conversion to yaml %s/%s: %w", ir.Namespace, ir.Name, err)
 			}
-			if klog.V(2) {
+			if klog.V(3) {
 				fmt.Fprintln(os.Stderr, "# Before\n---")
+				fmt.Fprintln(os.Stderr, string(vv))
 			}
-			fmt.Fprintln(os.Stdout, string(vv))
-			if klog.V(2) {
-				fmt.Fprintln(os.Stderr, "# After\n---")
-			}
+
 			hp, extra, err := translator.IngressRouteToHTTPProxy(&ir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, " error %s\n", err.Error())
@@ -130,12 +131,14 @@ func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []str
 				return fmt.Errorf("conversion to yaml %s/%s: %w", ir.Namespace, ir.Name, err)
 			}
 
-			fmt.Fprintln(os.Stderr, string(bb))
+			if klog.V(3) {
+				fmt.Fprintln(os.Stderr, "# After\n---")
+			}
+			fmt.Fprintf(os.Stdout, "# Generated from ingressroute %s/%s\n---\n",ir.Namespace,ir.Name)
+			fmt.Fprintln(os.Stdout, string(bb))
 			for kk, ii := range extra {
 				fmt.Fprintf(os.Stderr, "#[%d] %s\n", kk, ii)
 			}
-
-			//klog.V(2).Infof("[%d] %s", k, string(vv))
 		}
 		next = irList.GetContinue()
 		if next == "" {

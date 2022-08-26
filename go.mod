@@ -2,7 +2,7 @@ module github.com/projectcontour/ir2proxy
 
 go 1.18
 
-replace kapcom.adobe.com v1.20.1 => git.corp.adobe.com/fortescu/kapcom v1.12.1-0.20220825231740-007f74c8e52b
+replace kapcom.adobe.com v1.18.2 => git.corp.adobe.com/fortescu/kapcom v1.18.3-0.20220826192651-633eb5640a6c
 
 require (
 	github.com/ghodss/yaml v1.0.0
@@ -11,7 +11,7 @@ require (
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6
 	k8s.io/apimachinery v0.25.0
 	k8s.io/client-go v0.25.0
-	kapcom.adobe.com v1.20.1
+	kapcom.adobe.com v1.18.2
 )
 
 require (
@@ -25,8 +25,6 @@ require (
 )
 
 require (
-	github.com/fatih/color v1.13.0
-	github.com/gosuri/uitable v0.0.4
 	github.com/spf13/viper v1.12.0
 	github.com/tidwall/sjson v1.2.5
 	k8s.io/api v0.25.0
@@ -83,7 +81,6 @@ require (
 	github.com/mailru/easyjson v0.7.6 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
-	github.com/mattn/go-runewidth v0.0.13 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
@@ -100,7 +97,6 @@ require (
 	github.com/prometheus/client_model v0.2.0 // indirect
 	github.com/prometheus/common v0.26.0 // indirect
 	github.com/prometheus/procfs v0.6.0 // indirect
-	github.com/rivo/uniseg v0.2.0 // indirect
 	github.com/spf13/afero v1.8.2 // indirect
 	github.com/spf13/cast v1.5.0 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
