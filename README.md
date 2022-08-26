@@ -62,24 +62,9 @@ Logging is done to stderr.
 To use the tool, just run it with a filename as input.
 
 ```sh
-$ ir2proxy basic.ingressroute.yaml
----
-apiVersion: projectcontour.io/v1
-kind: HTTPProxy
-metadata:
-  name: basic
-  namespace: default
-spec:
-  routes:
-  - conditions:
-    - prefix: /
-    services:
-    - name: s1
-      port: 80
-  virtualhost:
-    fqdn: foo-basic.bar.com
-status: {}
+$ go run ./cmd/ir2proxy/ fixtures/most.yaml 
 ```
+> `fixtures/most.yaml` contains IngressRoute with most Adobe changes portrayed.
 
 Standalone `ir2proxy`'s intended mode of operation is in a one-file-at-a-time manner, so it's easier to use it in a Unix pipe.
 
