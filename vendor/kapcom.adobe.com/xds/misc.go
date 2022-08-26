@@ -1,7 +1,6 @@
 package xds
 
 import (
-	"os"
 	"time"
 
 	"kapcom.adobe.com/config"
@@ -14,13 +13,9 @@ import (
 func ConfigSource() *core.ConfigSource {
 	var timeout *duration.Duration
 	if config.Testing() {
-		if d, err := time.ParseDuration(os.Getenv("initial_fetch_timeout")); err == nil {
-			timeout = ptypes.DurationProto(d)
-		} else {
-			timeout = ptypes.DurationProto(time.Millisecond)
-		}
+		timeout = ptypes.DurationProto(time.Millisecond)
 	} else {
-		timeout = ptypes.DurationProto(300 * time.Second)
+		timeout = ptypes.DurationProto(1 * time.Minute)
 	}
 
 	return &core.ConfigSource{

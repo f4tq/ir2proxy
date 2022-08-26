@@ -177,8 +177,6 @@ type VirtualHost struct {
 	// The policy for rate limiting on the virtual host.
 	// +optional
 	RateLimitPolicy *RateLimitPolicy `json:"rateLimitPolicy,omitempty"`
-
-	Logging xlate.Logging `json:"adobe:logging,omitempty"`
 }
 
 // TLS describes tls properties. The CNI names that will be matched on

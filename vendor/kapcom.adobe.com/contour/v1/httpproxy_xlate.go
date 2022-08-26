@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -16,7 +15,7 @@ import (
 
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	ext_authz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
+	authz_http "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	matcher "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	wrapperspb "google.golang.org/protobuf/types/known/wrapperspb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -370,7 +369,6 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 		Name:      crd.Name,
 		Namespace: crd.Namespace,
 		TypeURL:   IngressTypeURL,
-		Priority:  2,
 	}
 
 	if crd.Annotations == nil {
@@ -380,9 +378,6 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 		if ingress.Class == "" {
 			ingress.CRDError = "Missing or empty " + annotations.IC + " annotation"
 		}
-
-		ingress.ServiceId = crd.Annotations[annotations.ServiceId]
-
 		if hostsAnnot := crd.Annotations[annotations.Hosts]; hostsAnnot != "" {
 			// input validation: no empty values, no duplicates, no '*', no collision with fqdn
 			// TODO: move this to xlate eventually; need to decide on a messaging strategy, which
@@ -418,13 +413,6 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 				hostMap[h] = true
 			}
 			ingress.VirtualHost.Domains = inHosts
-		}
-
-		if priorityAnnot := crd.Annotations[annotations.Priority]; priorityAnnot != "" {
-			priority, err := strconv.ParseInt(priorityAnnot, 10, 0)
-			if err == nil {
-				ingress.Priority = int(priority)
-			}
 		}
 	}
 
@@ -572,8 +560,6 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 			cpol.AllowCredentials = wrapperspb.Bool(pol.AllowCredentials)
 			ingress.VirtualHost.Cors = cpol
 		}
-
-		ingress.VirtualHost.Logging = crd.Spec.VirtualHost.Logging
 	}
 
 	if crd.Spec.TCPProxy != nil {
@@ -696,9 +682,9 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 			var pf = xRoute.PerFilterConfig
 			// route AuthPolicy can either be Disabled OR provide a context but not both
 			if route.AuthPolicy.Disabled {
-				pf.Authz = &xlate.ExtAuthzPerRoute{
-					ExtAuthzPerRoute: ext_authz.ExtAuthzPerRoute{
-						Override: &ext_authz.ExtAuthzPerRoute_Disabled{
+				pf.Authz = &envoy_api.ExtAuthzPerRoute{
+					ExtAuthzPerRoute: authz_http.ExtAuthzPerRoute{
+						Override: &authz_http.ExtAuthzPerRoute_Disabled{
 							Disabled: true,
 						},
 					},
@@ -712,10 +698,10 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 						mp[k] = v
 					}
 				}
-				pf.Authz = &xlate.ExtAuthzPerRoute{
-					ExtAuthzPerRoute: ext_authz.ExtAuthzPerRoute{
-						Override: &ext_authz.ExtAuthzPerRoute_CheckSettings{
-							CheckSettings: &ext_authz.CheckSettings{
+				pf.Authz = &envoy_api.ExtAuthzPerRoute{
+					ExtAuthzPerRoute: authz_http.ExtAuthzPerRoute{
+						Override: &authz_http.ExtAuthzPerRoute_CheckSettings{
+							CheckSettings: &authz_http.CheckSettings{
 								ContextExtensions: mp,
 							},
 						},

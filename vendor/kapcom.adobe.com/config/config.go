@@ -38,8 +38,7 @@ type (
 		AdobeEnvoyExtensions Truthy `long:"use-adobe-envoy-extensions" description:"use adobe envoy extensions (true|t|yes|y|on|1)"   env:"ADOBE_ENVOY_EXTENSIONS"`
 		MTLS                 Truthy `long:"use-mtls" description:"use-mtls (true|t|yes|y|on|1)" env:"MTLS" `
 		MtlsFlags            struct {
-			KeyBits     int    `long:"key-bits" env:"KEY_BITS" default:"2048" description:"keys bits used in cert generation"`
-			ManageCerts Truthy `long:"manage-certs" description:"create and rotate certs (true|t|yes|y|on|1)" env:"MANAGE_CERTS"`
+			KeyBits int `long:"key-bits" env:"KEY_BITS" default:"2048" description:"keys bits used in cert generation"`
 		} `group:"Mtls" namespace:"mtls" env-namespace:"MTLS" description:"mtls options"`
 		KapcomServiceName        string `long:"kapcom-service-name" description:"kapcom service name" default:"kapcom" env:"KAPCOM_SERVICE_NAME"`
 		KapcomNamespace          string `long:"kapcom-namespace" description:"kapcom namespace" default:"heptio-contour" env:"KAPCOM_NAMESPACE"`
@@ -48,15 +47,12 @@ type (
 		Contour struct {
 			EnvoyConfigDumpUrl string `long:"envoy-config-dump-url" description:"envoy config dump url" env:"ENVOY_CONFIG_DUMP_URL"`
 		} `group:"Contour" namespace:"contour" env-namespace:"CONTOUR" description:"contour options"`
-		PodIP                  string `long:"pod-ip"  description:"pod ip"  env:"POD_IP"`
+		PodIP                  string `long:"pod-ip" description:"pod ip"  env:"POD_IP"`
 		PodIPUint32            uint32
 		HostIP                 string        `long:"host-ip" required:"false" description:"host ip"  env:"HOST_IP"`
 		SecretRotationInterval time.Duration `long:"secret-rotation-interval" default:"60m" description:"secret rotation interval" env:"SECRET_ROTATION_INTERVAL"`
 		Grpc                   struct {
 			Tracing Truthy `long:"tracing" env:"TRACING" description:"enable grpc tracing (true|t|yes|y|on|1)"`
-			ALS     struct {
-				Enabled Truthy `long:"enabled" env:"ENABLED" description:"enable gRPC ALS integration (true|t|yes|y|on|1)"`
-			} `group:"als" namespace:"als" env-namespace:"ALS" `
 		} `group:"grpc" namespace:"grpc" env-namespace:"GRPC" `
 		Kubernetes struct {
 			ResyncInterval time.Duration `long:"resync-interval" env:"RESYNC_INTERVAL" description:"re-sync interval"  `
@@ -69,7 +65,6 @@ type (
 		Health struct {
 			Port int `long:"port"  env:"PORT" default:"3001" description:"The port xds listens on"`
 		} `group:"Health" namespace:"health" env-namespace:"HTTP"`
-		EnableCRDMigration Truthy `long:"enable-crd-migration" description:"enable-crd-migration (true|t|yes|y|on|1)" env:"ENABLE_CRD_MIGRATION" `
 	}
 )
 type Truthy bool
@@ -105,7 +100,6 @@ func init() {
 	Log = log15.New()
 	// initial parse the environment.
 	Parser().ParseArgs([]string{})
-	//Info()
 }
 
 func newKapcomConfg() *KapcomConfig {
@@ -193,7 +187,6 @@ func Info() {
 	onoff("Testing", Testing)
 	onoff("Writing CRD status", WriteCRDStatus)
 	onoff("Adobe Envoy extensions", AdobeEnvoyExtensions)
-	onoff("CRD migration", EnableCRDMigration)
 	fmt.Println("K8s resync interval:", K8sResyncInterval())
 	fmt.Println("Pod IP:", PodIP())
 	fmt.Println("Host IP:", HostIP())
@@ -217,10 +210,6 @@ func Reset() {
 
 func GrpcTracing() bool {
 	return bool(kapcom.Grpc.Tracing)
-}
-
-func GrpcAlsEnabled() bool {
-	return bool(kapcom.Grpc.ALS.Enabled)
 }
 
 func DebugLogs() bool {
@@ -256,11 +245,10 @@ func LogHealthCheckFailures() bool {
 }
 
 func MTLS() bool {
+	if Testing() {
+		return bool(kapcom.MTLS)
+	}
 	return bool(kapcom.MTLS)
-}
-
-func MTLSManageCerts() bool {
-	return bool(kapcom.MtlsFlags.ManageCerts)
 }
 
 func MTLSKeyBits() int {
@@ -313,8 +301,4 @@ func HealthPort() int {
 
 func XDSBacklog() int {
 	return kapcom.XDS.Backlog
-}
-
-func EnableCRDMigration() bool {
-	return bool(kapcom.EnableCRDMigration)
 }

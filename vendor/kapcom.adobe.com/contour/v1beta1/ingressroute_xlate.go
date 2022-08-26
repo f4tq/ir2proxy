@@ -1,7 +1,6 @@
 package v1beta1
 
 import (
-	"strconv"
 	"strings"
 	"time"
 
@@ -108,7 +107,6 @@ func (recv *IRHandler) CRDToIngress(crd *IngressRoute) *xlate.Ingress {
 		Name:      crd.Name,
 		Namespace: crd.Namespace,
 		TypeURL:   IngressTypeURL,
-		Priority:  1,
 	}
 
 	if crd.Annotations == nil {
@@ -153,12 +151,6 @@ func (recv *IRHandler) CRDToIngress(crd *IngressRoute) *xlate.Ingress {
 				hostMap[h] = true
 			}
 			ingress.VirtualHost.Domains = inHosts
-		}
-		if priorityAnnot := crd.Annotations[annotations.Priority]; priorityAnnot != "" {
-			priority, err := strconv.ParseInt(priorityAnnot, 10, 0)
-			if err == nil {
-				ingress.Priority = int(priority)
-			}
 		}
 	}
 

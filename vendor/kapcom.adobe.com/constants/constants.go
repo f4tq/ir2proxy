@@ -7,11 +7,9 @@ import (
 const (
 	ProgramNameUpper = "KAPCOM"
 	ProgramNameLower = "kapcom"
-	ProgramVersion   = "1.20.1"
+	ProgramVersion   = "1.18.2"
 
-	ServerHeader    = "adobe"
-	IngressHeader   = "x-adobe-ingress"
-	ServiceIdHeader = "x-service-id"
+	ServerHeader = "adobe"
 
 	// must match xlate/listeners.json
 	TestIngressClass = "public"
@@ -31,10 +29,6 @@ const (
 
 	HealthCheckSimpleFilter = "envoy.filters.http.health_check_simple"
 	HeaderSizeFilter        = "envoy.filters.http.header_size"
-	IpAllowDenyFilter       = "envoy.filters.http.ip_allow_deny"
-
-	// TODO(bcook) is this in `package wellknown` in a future version of go-control-plane?
-	HeaderToMetadataFilter = "envoy.filters.http.header_to_metadata"
 
 	// z primarily for our tests since our envoy_api sorts resources and we
 	// name most things test*
@@ -49,13 +43,12 @@ const (
 
 	RatelimitClass = "ratelimit_services"
 	AuthzClass     = "authz_services"
-
-	TopologyZoneLabel = "topology.kubernetes.io/zone"
 )
 
 var (
 	MTLSParams = &tls.TlsParameters{
-		TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_3,
+		TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_1,
 		TlsMaximumProtocolVersion: tls.TlsParameters_TLSv1_3,
+		CipherSuites:              []string{"TLS_RSA_WITH_AES_128_CBC_SHA"},
 	}
 )

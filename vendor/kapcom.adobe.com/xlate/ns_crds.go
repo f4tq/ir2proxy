@@ -24,23 +24,6 @@ type (
 	}
 )
 
-func endpointsIPs(kEndpoints *k8s.Endpoints) (ips []string) {
-	if kEndpoints == nil {
-		return
-	}
-
-	for _, subset := range kEndpoints.Subsets {
-		for _, address := range subset.Addresses {
-			if address.IP != "" {
-				ips = append(ips, address.IP)
-			} else if address.Hostname != "" {
-				ips = append(ips, address.Hostname)
-			}
-		}
-	}
-	return
-}
-
 func newNamespaceCRDs() namespaceCRDs {
 	return namespaceCRDs{
 		ingressTypes: make(map[string]ingressMap),
