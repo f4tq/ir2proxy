@@ -16,9 +16,8 @@ package k8sdecoder
 
 import (
 	"fmt"
-
-	irv1beta1 "github.com/projectcontour/contour/apis/contour/v1beta1"
-	contourscheme "github.com/projectcontour/contour/apis/generated/clientset/versioned/scheme"
+	irv1beta1 "kapcom.adobe.com/contour/v1beta1"
+	contourscheme "kapcom.adobe.com/contour/generated/v1/clientset/versioned/scheme"
 	"k8s.io/client-go/kubernetes/scheme"
 )
 

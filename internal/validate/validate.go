@@ -15,7 +15,7 @@
 package validate
 
 import (
-	irv1beta1 "github.com/projectcontour/contour/apis/contour/v1beta1"
+	irv1beta1 "kapcom.adobe.com/contour/v1beta1"
 )
 
 // CheckIngressRoute checks an IngressRoute and returns a slice of warnings if any problems are found.

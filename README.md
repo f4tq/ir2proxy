@@ -1,15 +1,60 @@
 # ir2proxy [![Build Status](https://travis-ci.com/projectcontour/ir2proxy.svg?branch=main)](https://travis-ci.com/projectcontour/ir2proxy) [![Go Report Card](https://goreportcard.com/badge/github.com/projectcontour/ir2proxy)](https://goreportcard.com/report/github.com/projectcontour/ir2proxy) ![GitHub release](https://img.shields.io/github/release/projectcontour/ir2proxy.svg) [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-ir2proxy is a tool to convert Contour's IngressRoute resources to HTTPProxy resources.
+ir2proxy is a set of tool to convert Contour's IngressRoute resources to HTTPProxy resources.
+
+It was forked from upstream contour to add Adobe's changes made to both ingressroute and httpproxy 
+
 
 ## Features
 
 ir2proxy can translate an IngressRoute object to an HTTPProxy object.
 The full featureset of IngressRoute should be translated correctly.
-If not, please [log an issue](https://github.com/projectcontour/ir2proxy/issues), specifying what didn't work and supplying the sanitized IngressRoute YAML.
+If not, please [log an issue](https://git.corp.adobe.com/adobe-platform/ir2proxy/issues), specifying what didn't work and supplying the sanitized IngressRoute YAML.
+
+This fork adds `kubectl-kapcom` which plugs in to kubectl as a means to help convert existing ingressroute manifests already present in kubernetes cluster 
+
+
+## Migration
+Prep audit comparing Adobe additions to both ingressroutes and httpproxy.
+
+[Here](https://git.corp.adobe.com/gist/fortescu/1aed3013677099a0b657a2dd673d8c5d)
 
 ## Usage
 
+
+### kubectl-kapcom
+The kubectl plugin `ir2proxy` performs the same transformation as the original tool except it uses kubernetes as ingressroute source.
+
+```
+go build -o kubectl-kapcom ./cmd/kubectl-kapcom
+ln -s `pwd`/kubectl-kapcom /usr/local/bin/kubectl-kapcom
+kubectl kapcom ir2proxy -A
+```
+
+#### examples
+> Switch to a dev cluster
+
+```
+k ctx ethos01-dev-va6
+```
+- Target a single ingressroute
+```
+kubectl kapcom  ir2proxy -n laurent   hello 
+```
+
+- Target a namespace
+
+```
+kubectl kapcom  ir2proxy -n ns-team-cgw-e2e-testing 
+```
+
+- Target all namespaces
+
+```
+kubectl kapcom  ir2proxy -A
+```
+
+### ir2proxy 
 `ir2proxy` is intended for taking a yaml file containing one or more valid IngressRoute objects, and then outputting translated HTTPProxy objects to stdout.
 
 Logging is done to stderr.
@@ -36,35 +81,67 @@ spec:
 status: {}
 ```
 
-Its intended mode of operation is in a one-file-at-a-time manner, so it's easier to use it in a Unix pipe.
+Standalone `ir2proxy`'s intended mode of operation is in a one-file-at-a-time manner, so it's easier to use it in a Unix pipe.
+
 
 ## Installation
 
 ### Homebrew
+>  The homebrew version does not account for kapcom ingressroute and httpproxies schema changes
 
-Add the `ir2proxy` tap (located at [homebrew-ir2proxy](https://github.com/projectcontour/homebrew-ir2proxy)):
+### Requirements
+- Go version 1.19
+- kubectl
 
-```sh
-brew tap projectcontour/ir2proxy
+> MacOS
+```
+  brew update
+  HOMEBREW_NO_AUTO_UPDATE=1 brew install go@1.19
+  HOMEBREW_NO_AUTO_UPDATE=1 brew install kubectl
 ```
 
-Then install ir2proxy:
+### kubectl-kapcom
 
-```sh
-brew install ir2proxy
+```
+go build -o kubectl-kapcom ./cmd/kubectl-kapcom
+sudo ln -s `pwd`/kubectl-kapcom /usr/local/bin/kubectl 
 ```
 
-To upgrade, use
-
-```sh
-brew upgrade ir2proxy
+### ir2proxy
 ```
+go build -o kubectl-kapcom ./cmd/kubectl-kapcom
+```
+## Gap Analysis
+The following table depicts the *Adobe* specific gaps for changes between ingressroute and httpproxy
+
+
+| ingressroute CRD reference | httpproxy supported? | Notes|
+--- |  --- | ---|
+|route.RequestHeadersPolicy| Yes||
+|route.ResponseHeadersPolicy| Yes||
+|route.perFilterConfig| Yes||
+|route.enableSPDY|No||
+|route.headerMatch|Yes|Moved to route.conditions|
+|route.services.service.idleTimeout|Yes| Moved to route.timeoutPolicy|
+|route.services.service.perPodMaxConnections| No||
+|route.services.service.perPodMaxPendingRequests|No||
+|route.services.service.perPodMaxRequests|No||
+|route.services.service.connectTimeout|No||
+|route.HashPolicies|No||
 
 ### Non-homebrew
 
-Go to the [releases](https://github.com/projectcontour/ir2proxy/releases) page and download the latest version.
+```
+docker run -it -v `pwd`:/go/src/ir2hp.adobe.com -w /go/src/ir2hp.adobe.com -e CGO_ENABLED=0 golang:1.18.5 go build -o kubectl-kapcom ./cmd/kubectl-kapcom
+```
+> Generates a statically linked linux binary that can be run from any linux container/host
+ 
+Go to the [releases](https://git.corp.adobe.com/adobe-platform/ir2proxy/releases) page and download the latest version.
 
 ## Possible issues with conversion and what to do about them
+
+### Missing Adobe HTTProxy fields present in ingressroute
+> For a deep dive into Adobe ingressroute and httpproxy changes [see](https://git.corp.adobe.com/gist/fortescu/1aed3013677099a0b657a2dd673d8c5d)
 
 ### Prefix behavior in IngressRoute vs HTTPProxy
 
