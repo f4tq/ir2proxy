@@ -10,10 +10,12 @@ import (
 	"github.com/projectcontour/ir2proxy/cmd/kubectl-kapcom/commands"
 	"github.com/projectcontour/ir2proxy/cmd/kubectl-kapcom/commands/util"
 	"github.com/projectcontour/ir2proxy/internal/translator"
+	v1 "kapcom.adobe.com/contour/v1"
 
 	"github.com/spf13/cobra"
 	_ "github.com/spf13/viper"
 	"github.com/tidwall/sjson"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // combined authprovider import
@@ -37,7 +39,9 @@ func CreateConvertCommand(flags *genericclioptions.ConfigFlags) *cobra.Command {
 	}
 	util.AddNamespacesFlag(cmd)
 	cmd.Flags().Bool(commands.ApplyFlag, false, "Transform all ingressroutes to httpproxy in place")
-	cmd.Flags().StringP("namespace", "n", "", "namespace")
+	cmd.Flags().StringP("namespace", "n", "default", "namespace")
+	cmd.Flags().Int16P(commands.Priority,"p",2,"set aannotation kapcom.adobe.io/priority: $priority")
+	cmd.Flags().Bool(commands.Force, false, "force --apply to go forward despite warnings.  BEWARE")
 
 	return cmd
 }
@@ -81,16 +85,28 @@ func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []str
 	if err != nil {
 		return err
 	}
-	if apply {
-		log.Fatal("--apply has not been implemented yet.  Stay tuned")
+	force, err := cmd.Flags().GetBool(commands.Force)
+	if err != nil {
+		return err
 	}
 	ns, err := cmd.Flags().GetString("namespace")
+	if err != nil {
+		return err
+	}
+	priority, err := cmd.Flags().GetInt16(commands.Priority)
 	if err != nil {
 		return err
 	}
 	if allNs {
 		ns = ""
 		ingressroute = []string{}
+	} else if ns ==""{
+		ns = "default"
+		log.Fatal("No namespace designated.  Please be explicit")
+	}
+
+	if apply && allNs{
+		log.Fatal("--apply is restricted to maximum of namespace scope blast radius by policy")
 	}
 	
 	klog.V(2).Infof("convert namespace=%s allNamespaces=%v", ns, allNs)
@@ -125,7 +141,17 @@ func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []str
 			if err != nil {
 				fmt.Fprintf(os.Stderr, " error %s\n", err.Error())
 			}
-
+			hp.Annotations[commands.AnnotationPriorityKey] = fmt.Sprintf("%d",priority)
+			if apply {
+				if len(extra) > 0 && !force {
+					fmt.Fprintf(os.Stderr, "IngressRoute %s/%s refusing to --apply due to warnings:\n", ir.Namespace,ir.Name)
+					for kk, ii := range extra {
+						fmt.Fprintf(os.Stderr, "#[%d] %s\n", kk, ii)
+					}
+					continue
+				}
+				doApply(hp)
+			}
 			bb, err := neatYaml(hp, true)
 			if err != nil {
 				return fmt.Errorf("conversion to yaml %s/%s: %w", ir.Namespace, ir.Name, err)
@@ -146,4 +172,19 @@ func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []str
 		}
 	}
 	return nil
+}
+
+func doApply ( converted *v1.HTTPProxy ) (_ *v1.HTTPProxy, err error ) {
+
+	client := commands.Kv1.ProjectcontourV1().HTTPProxies(converted.Namespace)
+	_, err = client.Get(context.Background(), converted.Name,  metav1.GetOptions{})
+
+	if err != nil && apierrors.IsNotFound(err) {
+		return client.Create(context.Background(), converted, metav1.CreateOptions{
+			TypeMeta:     metav1.TypeMeta{},
+			DryRun:       nil,
+			FieldManager: "",
+		})
+	}
+	return nil,err 
 }

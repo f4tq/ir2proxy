@@ -12,6 +12,9 @@ const (
 	PodFlag = "pod"
 	DeploymentFlag = "deployment"
 	SelectorFlag = "selector"
+	Priority = "priority"
+	AnnotationPriorityKey = "kapcom.adobe.io/priority"
+	Force="force"
 )
 
 var (
