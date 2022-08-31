@@ -1,13 +1,16 @@
 # ir2proxy [![Build Status](https://travis-ci.com/projectcontour/ir2proxy.svg?branch=main)](https://travis-ci.com/projectcontour/ir2proxy) [![Go Report Card](https://goreportcard.com/badge/github.com/projectcontour/ir2proxy)](https://goreportcard.com/report/github.com/projectcontour/ir2proxy) ![GitHub release](https://img.shields.io/github/release/projectcontour/ir2proxy.svg) [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-ir2proxy is a set of tool to convert Contour's IngressRoute resources to HTTPProxy resources.
+ir2proxy is a set of tools used to convert Contour's IngressRoute resources to HTTPProxy resources.
 
 It was forked from upstream contour to add Adobe's changes made to both ingressroute and httpproxy 
 
 
 ## Features
 
-ir2proxy can translate an IngressRoute object to an HTTPProxy object.
+`ir2proxy` can translate an IngressRoute object to an HTTPProxy object from yaml file.
+
+`kubectl-kapcom` can translate IngressRoute objects to HTTPProxy object and apply the changes on a kubernetes cluster.
+
 The full featureset of IngressRoute should be translated correctly.
 If not, please [log an issue](https://git.corp.adobe.com/adobe-platform/ir2proxy/issues), specifying what didn't work and supplying the sanitized IngressRoute YAML.
 
@@ -17,7 +20,7 @@ This fork adds `kubectl-kapcom` which plugs in to kubectl as a means to help con
 ## Migration
 Prep audit comparing Adobe additions to both ingressroutes and httpproxy.
 
-[Here](https://git.corp.adobe.com/gist/fortescu/1aed3013677099a0b657a2dd673d8c5d)
+An [prepatory audit](https://git.corp.adobe.com/gist/fortescu/1aed3013677099a0b657a2dd673d8c5d) examining Adobe changes to the IngressRoute and HTTPProxy objects was performed as part of the this fork.
 
 ## Usage
 
@@ -25,6 +28,30 @@ Prep audit comparing Adobe additions to both ingressroutes and httpproxy.
 ### kubectl-kapcom
 The kubectl plugin `ir2proxy` performs the same transformation as the original tool except it uses kubernetes as ingressroute source.
 
+```
+kubectl kapcom ir2proxy --help
+ir2proxy transforms ingressroute into httpproxy
+
+Usage:
+  kubectl-kapcom ir2proxy [flags]
+
+Examples:
+                kubectl kapcom ir2proxy -A
+                kubectl kapcom ir2proxy -n monitoring grafana
+
+Flags:
+  -A, --all-namespaces     query all objects in all API groups, both namespaced and non-namespaced
+      --apply              Transform all ingressroutes to httpproxy in place
+      --force              force --apply to go forward despite warnings.  BEWARE
+  -h, --help               help for ir2proxy
+  -n, --namespace string   namespace (default "default")
+  -p, --priority int16     set aannotation kapcom.adobe.io/priority: $priority (default 2)
+
+Global Flags:
+  -v, --v Level   number for the log level verbosity
+```
+
+#### Building & Installing
 ```
 go build -o kubectl-kapcom ./cmd/kubectl-kapcom
 ln -s `pwd`/kubectl-kapcom /usr/local/bin/kubectl-kapcom
@@ -53,6 +80,7 @@ kubectl kapcom  ir2proxy -n ns-team-cgw-e2e-testing
 ```
 kubectl kapcom  ir2proxy -A
 ```
+> To apply changes, there should be no warnings emitted.  That can be overridden using `--apply --force`.
 
 ### ir2proxy 
 `ir2proxy` is intended for taking a yaml file containing one or more valid IngressRoute objects, and then outputting translated HTTPProxy objects to stdout.

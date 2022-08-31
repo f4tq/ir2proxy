@@ -168,8 +168,7 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 	}
 	if len(irRoute.HeaderMatch) > 0 {
 		for _, jj := range irRoute.HeaderMatch {
-			nn := hpv1.Condition{
-			}
+			nn := hpv1.Condition{}
 			switch {
 			case jj.Present != nil:
 				nn.Header.Present = *jj.Present
@@ -270,8 +269,8 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 			warnings = append(warnings, "httpproxy has no equivalent for ingressroute route.service.perPodMaxRequests")
 		}
 		if irRoute.IdleTimeout != nil {
-			warnings = append(warnings, "httpproxy has direct equivalent for ingressroute route.service.idleTimeout.  attempting to use route.TimeoutPolicy")
-			dur := irRoute.IdleTimeout.String()	
+			warnings = append(warnings, "httpproxy has broader IdleTimeout equivalent at the route not service level")
+			dur := irRoute.IdleTimeout.String()
 			if route.TimeoutPolicy == nil {
 				route.TimeoutPolicy = &hpv1.TimeoutPolicy{
 					Idle: dur,
@@ -287,11 +286,12 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 
 		service, healthcheckPolicy, lbpolicy := translateService(*irService)
 
-		if lbpolicy != nil {	
-			if irRoute.HashPolicy != nil {
-				warnings = append(warnings,"service has lbpolicy but route 'Cookie' policy in httpproxy for sticksession")
-			}
-		
+		if irRoute.HashPolicy != nil {
+			// See https://projectcontour.io/docs/v1.19.0/config/request-routing/#session-affinity
+			warnings = append(warnings, fmt.Sprintf("Ingressroute service '%s' uses Adobe add-on 'HashPolicy' triggering sticky-sessions but HTTPProxy equive (Cookie|RequestHash) have not been implemented.  Setting to the more general 'RequestHash'!", irService.Name))
+			route.LoadBalancerPolicy = &hpv1.LoadBalancerPolicy{Strategy: "RequestHash"}
+		} else if lbpolicy != nil {
+			// go with the existing lbpolicy will prob need to be coerced to RequestHash if IngressRoute
 			if seenLBStrategy == "" {
 				// Copy the first strategy we encounter into the HP loadbalancerpolicy
 				// and save that we've seen that one.
@@ -302,12 +302,7 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 					warnings = append(warnings, fmt.Sprintf("Strategy %s on Service %s could not be applied, HTTPProxy only supports a single load balancing policy across all services. %s is already applied.", irService.Strategy, irService.Name, seenLBStrategy))
 				}
 			}
-		} else {
-			// See https://projectcontour.io/docs/v1.19.0/config/request-routing/#session-affinity
-			route.LoadBalancerPolicy = &hpv1.LoadBalancerPolicy{ Strategy: "RequestHash"}
-			// however, kapcom ignores Strategy RequestHash and Cookie
-			// See https://git.corp.adobe.com/adobe-platform/kapcom/blob/main/contour/v1/httpproxy_xlate.go#L126
-		}
+		} 
 
 		if healthcheckPolicy != nil {
 			if seenHealthCheckPolicy == nil {
@@ -399,18 +394,6 @@ func translateTCPProxy(irTCPProxy *irv1beta1.TCPProxy) (*hpv1.TCPProxy, []hpv1.I
 
 	var includes []hpv1.Include
 	var warnings []string
-	/*
-		if irTCPProxy.Delegate != nil {
-			if len(irTCPProxy.Services) > 0 {
-				return nil, includes, warnings, errors.New("invalid IngressRoute: Delegate and Services can not both be set")
-			}
-			includes = append(includes, hpv1.Include{
-				Name:      irTCPProxy.Delegate.Name,
-				Namespace: irTCPProxy.Delegate.Namespace,
-			})
-			return nil, includes, warnings, nil
-		}
-	*/
 	proxy := &hpv1.TCPProxy{}
 	for _, irService := range irTCPProxy.Services {
 

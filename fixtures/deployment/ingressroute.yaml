@@ -86,9 +86,10 @@ items:
       - name: hello2
         port: 3003
     virtualhost:
-      fqdn: f4tq.ethos51-dev-va6.ethos.adobe.net
+      fqdn: f4tq.sandbox.cloud.adobe.io
       tls:
-        secretName: heptio-contour/cluster-ssl-public
+#        secretName: heptio-contour/cluster-ssl-public
+        secretName: cluster-ssl-x-sandbox-cloud-adobe-io 
   status:
     currentStatus: valid
     description: valid IngressRoute
