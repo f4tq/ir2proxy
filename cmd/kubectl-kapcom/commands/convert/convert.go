@@ -139,7 +139,8 @@ func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []str
 
 			hp, extra, err := translator.IngressRouteToHTTPProxy(&ir)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, " error %s\n", err.Error())
+				fmt.Fprintf(os.Stderr, "%s/%s error %s\n", ir.Namespace, ir.Name,err .Error())
+				continue
 			}
 			hp.Annotations[commands.AnnotationPriorityKey] = fmt.Sprintf("%d",priority)
 			if apply {
