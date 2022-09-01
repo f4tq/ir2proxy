@@ -41,7 +41,7 @@ func CreateShowRootCommand(flags *genericclioptions.ConfigFlags) *cobra.Command 
 
 	return rootCmd2
 }
-func run(cf *genericclioptions.ConfigFlags, command *cobra.Command, args []string) error {
+func run(cf *genericclioptions.ConfigFlags, command *cobra.Command, _ []string) error {
 	var next string
 	allNs, err := command.Flags().GetBool(commands.AllNamespacesFlag)
 	if err != nil {

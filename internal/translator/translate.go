@@ -88,6 +88,16 @@ func IngressRouteToHTTPProxy(ir *irv1beta1.IngressRoute) (*hpv1.HTTPProxy, []str
 				warnings = append(warnings, fmt.Sprintf("target virtualhost %s could not be Unmarshalled because: %s", ir.Spec.VirtualHost.Fqdn, err.Error()))
 				vhost = nil
 			}
+			if ir.Spec.VirtualHost.TLS != nil {
+				if len(ir.Spec.VirtualHost.TLS.CipherSuites) > 0 {
+					cp := make([]string, len(ir.Spec.VirtualHost.TLS.CipherSuites))
+					copy(cp, ir.Spec.VirtualHost.TLS.CipherSuites)
+					vhost.TLS.CipherSuites = cp
+				}
+				if ir.Spec.VirtualHost.TLS.MaximumProtocolVersion != "" {
+					vhost.TLS.MaximumProtocolVersion = ir.Spec.VirtualHost.TLS.MaximumProtocolVersion
+			}
+			}
 		}
 	}
 
@@ -127,7 +137,7 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 
 	route := hpv1.Route{
 		Conditions: []hpv1.Condition{
-			hpv1.Condition{},
+			{},
 		},
 	}
 
@@ -242,7 +252,7 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 	if irRoute.PrefixRewrite != "" {
 		route.PathRewritePolicy = &hpv1.PathRewritePolicy{
 			ReplacePrefix: []hpv1.ReplacePrefix{
-				hpv1.ReplacePrefix{
+				{
 					Replacement: irRoute.PrefixRewrite,
 				},
 			},
@@ -251,6 +261,8 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 	if irRoute.EnableSPDY {
 		warnings = append(warnings, "ingressroute.EnableSPDY has no equivalent in httpproxy ")
 	}
+	route.PermitInsecure = irRoute.PermitInsecure
+	
 	var seenLBStrategy string
 	var seenHealthCheckPolicy *irv1beta1.HealthCheck
 	var seenHealthCheckServiceName string
@@ -345,6 +357,7 @@ func translateService(irService irv1beta1.Service) (hpv1.Service, *hpv1.HTTPHeal
 			TimeoutSeconds:          int64(irService.HealthCheck.TimeoutSeconds),
 			UnhealthyThresholdCount: irService.HealthCheck.UnhealthyThresholdCount,
 			HealthyThresholdCount:   irService.HealthCheck.HealthyThresholdCount,
+			IntervalSeconds: 		 int64(irService.HealthCheck.IntervalSeconds),
 		}
 	}
 
@@ -359,7 +372,7 @@ func translateInclude(irRoute irv1beta1.Route) *hpv1.Include {
 
 	return &hpv1.Include{
 		Conditions: []hpv1.Condition{
-			hpv1.Condition{
+			{
 				Prefix: irRoute.Match,
 			},
 		},

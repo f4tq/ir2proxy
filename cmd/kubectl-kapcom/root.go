@@ -64,7 +64,7 @@ var rootCmd = &cobra.Command{
         Use:   "kubectl-kapcom",
         Short: "A kubectl plugin for Adobe kapcom tasks",
         Version:      versionString(),
-        PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+        PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
                 // setup ClientSet clients for kapcom ingressroute and httpproxy
 		var err error
 		restConfig, err := cf.ToRESTConfig()
@@ -121,7 +121,7 @@ func init() {
 		fmt.Fprintf(os.Stderr, "failed to set logtostderr flag: %v\n", err)
 		os.Exit(1)
 	}
-	rootCmd.AddCommand(convert.CreateConvertCommand(cf))
+	rootCmd.AddCommand(convert.CreateConvertCommand())
 }
 
 func main() {

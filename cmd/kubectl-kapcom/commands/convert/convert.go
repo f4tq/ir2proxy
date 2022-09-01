@@ -17,14 +17,13 @@ import (
 	"github.com/tidwall/sjson"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // combined authprovider import
 	"k8s.io/klog"
 	"sigs.k8s.io/yaml"
 )
 
 // CreateConvertCommand creates and returns this cobra subcommand
-func CreateConvertCommand(flags *genericclioptions.ConfigFlags) *cobra.Command {
+func CreateConvertCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ir2proxy",
 		Short: "ir2proxy transforms ingressroute into httpproxy",
@@ -33,21 +32,23 @@ func CreateConvertCommand(flags *genericclioptions.ConfigFlags) *cobra.Command {
 		kubectl kapcom ir2proxy -A
 		kubectl kapcom ir2proxy -n monitoring grafana`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			util.PrintError(transform(flags, cmd, args))
+			util.PrintError(transform( cmd, args))
 			return nil
 		},
 	}
 	util.AddNamespacesFlag(cmd)
 	cmd.Flags().Bool(commands.ApplyFlag, false, "Transform all ingressroutes to httpproxy in place")
 	cmd.Flags().StringP("namespace", "n", "default", "namespace")
-	cmd.Flags().Int16P(commands.Priority,"p",2,"set aannotation kapcom.adobe.io/priority: $priority")
+	cmd.Flags().Int16P(commands.Priority, "p", 2, "set annotation kapcom.adobe.io/priority: $priority")
 	cmd.Flags().Bool(commands.Force, false, "force --apply to go forward despite warnings.  BEWARE")
 
 	return cmd
 }
 
+type Extra func(vin string) (string, error)
+
 // neatYaml -- helper that removes kubernetes injected keys from given object's yaml rep
-func neatYaml(ir interface{}, debug bool) ([]byte, error) {
+func neatYaml(ir interface{}, _ bool, handlers ...Extra) ([]byte, error) {
 	vraw, err := json.Marshal(ir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to construct httpproxy client: %w", err)
@@ -62,7 +63,13 @@ func neatYaml(ir interface{}, debug bool) ([]byte, error) {
 		}
 		v2 = vint
 	}
-
+	for kk, vv := range handlers {
+		vint, err := vv(v2)
+		if err != nil {
+			return nil, fmt.Errorf("failed on function[%d] handler because %s", kk, err)
+		}
+		v2 = vint
+	}
 	return yaml.JSONToYAML([]byte(v2))
 }
 func contains(needle string, haystack []string) bool {
@@ -73,8 +80,9 @@ func contains(needle string, haystack []string) bool {
 	}
 	return false
 }
+
 // transform -- transform
-func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []string) error {
+func transform( cmd *cobra.Command, args []string) error {
 	var next string
 	allNs, err := cmd.Flags().GetBool(commands.AllNamespacesFlag)
 	if err != nil {
@@ -100,15 +108,15 @@ func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []str
 	if allNs {
 		ns = ""
 		ingressroute = []string{}
-	} else if ns ==""{
+	} else if ns == "" {
 		ns = "default"
 		log.Fatal("No namespace designated.  Please be explicit")
 	}
 
-	if apply && allNs{
+	if apply && allNs {
 		log.Fatal("--apply is restricted to maximum of namespace scope blast radius by policy")
 	}
-	
+
 	klog.V(2).Infof("convert namespace=%s allNamespaces=%v", ns, allNs)
 	klog.V(2).Infof("convert ingressroute=%s", ingressroute)
 	klog.V(2).Infof("convert apply=%v", apply)
@@ -139,13 +147,13 @@ func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []str
 
 			hp, extra, err := translator.IngressRouteToHTTPProxy(&ir)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s/%s error %s\n", ir.Namespace, ir.Name,err .Error())
+				fmt.Fprintf(os.Stderr, "%s/%s error %s\n", ir.Namespace, ir.Name, err.Error())
 				continue
 			}
-			hp.Annotations[commands.AnnotationPriorityKey] = fmt.Sprintf("%d",priority)
+			hp.Annotations[commands.AnnotationPriorityKey] = fmt.Sprintf("%d", priority)
 			if apply {
 				if len(extra) > 0 && !force {
-					fmt.Fprintf(os.Stderr, "IngressRoute %s/%s refusing to --apply due to warnings:\n", ir.Namespace,ir.Name)
+					fmt.Fprintf(os.Stderr, "IngressRoute %s/%s refusing to --apply due to warnings:\n", ir.Namespace, ir.Name)
 					for kk, ii := range extra {
 						fmt.Fprintf(os.Stderr, "#[%d] %s\n", kk, ii)
 					}
@@ -153,7 +161,44 @@ func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []str
 				}
 				doApply(hp)
 			}
-			bb, err := neatYaml(hp, true)
+			bb, err := neatYaml(hp, true, func(vv string) (string, error) {
+				// clean up emitted yaml
+				if hp.Spec.TCPProxy != nil && hp.Spec.TCPProxy.LeastRequestLbConfig == nil {
+					vint, err := sjson.Delete(vv, "spec.tcpproxy.adobe\\:leastRequestLbConfig")
+					if err != nil {
+						return "", fmt.Errorf("error deleting spec.tcpproxy.adobe\\:leastRequestLbConfig")
+					}
+					vv = vint
+				}
+				for kk, rr := range hp.Spec.Routes {
+					// filter out LeastRequestLbConfig from dumping if nil
+					if rr.LeastRequestLbConfig == nil {
+						vint, err := sjson.Delete(vv, fmt.Sprintf("spec.routes.%d.adobe\\:leastRequestLbConfig", kk))
+						if err != nil {
+							return "", fmt.Errorf("error deleting loadbalancerpolicy %d", kk)
+						}
+						vv = vint
+					}
+					// filter out idleTimeout
+					if rr.TimeoutPolicy != nil {
+						if rr.TimeoutPolicy.Idle == "" {
+							vint, err := sjson.Delete(vv, fmt.Sprintf("spec.routes.%d.timeoutPolicy.idle", kk))
+							if err != nil {
+								return "", fmt.Errorf("error deleting route.timeoutPolicy.idle %d", kk)
+							}
+							vv = vint
+						}
+						if rr.TimeoutPolicy.Response== "" {
+							vint, err := sjson.Delete(vv, fmt.Sprintf("spec.routes.%d.timeoutPolicy.response", kk))
+							if err != nil {
+								return "", fmt.Errorf("error deleting route.timeoutPolicy.response %d", kk)
+							}
+							vv = vint
+						}
+					}
+				}
+				return vv, nil
+			})
 			if err != nil {
 				return fmt.Errorf("conversion to yaml %s/%s: %w", ir.Namespace, ir.Name, err)
 			}
@@ -161,7 +206,7 @@ func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []str
 			if klog.V(3) {
 				fmt.Fprintln(os.Stderr, "# After\n---")
 			}
-			fmt.Fprintf(os.Stdout, "# Generated from ingressroute %s/%s\n---\n",ir.Namespace,ir.Name)
+			fmt.Fprintf(os.Stdout, "# Generated from ingressroute %s/%s\n---\n", ir.Namespace, ir.Name)
 			fmt.Fprintln(os.Stdout, string(bb))
 			for kk, ii := range extra {
 				fmt.Fprintf(os.Stderr, "#[%d] %s\n", kk, ii)
@@ -175,10 +220,10 @@ func transform(cf *genericclioptions.ConfigFlags, cmd *cobra.Command, args []str
 	return nil
 }
 
-func doApply ( converted *v1.HTTPProxy ) (_ *v1.HTTPProxy, err error ) {
+func doApply(converted *v1.HTTPProxy) (_ *v1.HTTPProxy, err error) {
 
 	client := commands.Kv1.ProjectcontourV1().HTTPProxies(converted.Namespace)
-	_, err = client.Get(context.Background(), converted.Name,  metav1.GetOptions{})
+	_, err = client.Get(context.Background(), converted.Name, metav1.GetOptions{})
 
 	if err != nil && apierrors.IsNotFound(err) {
 		return client.Create(context.Background(), converted, metav1.CreateOptions{
@@ -187,5 +232,5 @@ func doApply ( converted *v1.HTTPProxy ) (_ *v1.HTTPProxy, err error ) {
 			FieldManager: "",
 		})
 	}
-	return nil,err 
+	return nil, err
 }

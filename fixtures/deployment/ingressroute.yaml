@@ -88,8 +88,11 @@ items:
     virtualhost:
       fqdn: f4tq.sandbox.cloud.adobe.io
       tls:
-#        secretName: heptio-contour/cluster-ssl-public
+        maximumProtocolVersion: "1.2"
         secretName: cluster-ssl-x-sandbox-cloud-adobe-io 
+        cipherSuites:
+        - "TLS_RSA_WITH_AES_256_GCM_SHA384|TLS_RSA_WITH_AES_256_CBC_SHA"
+        - TLS_RSA_WITH_AES_128_GCM_SHA256
   status:
     currentStatus: valid
     description: valid IngressRoute
