@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,12 +36,9 @@ const (
 	SidecarRole
 )
 
-type (
-	l4Address struct {
-		ip   string
-		port uint32
-	}
+const doTriggerXDS bool = true
 
+type (
 	addEvent struct {
 		iface interface{}
 	}
@@ -98,6 +97,15 @@ type (
 		statsCluster     xds.Wrapper
 		rateLimitCluster xds.Wrapper
 		authzCluster     xds.Wrapper
+		migrated         map[*Ingress]struct{}
+
+		// given the options about how to store IP address association with zone
+		// we choose to expand a CIDR into IP addresses it covers and store
+		// them compactly as a map of uint32 (4 bytes vs 15) to string knowing
+		// that the zone string is not much bigger than a pointer (i.e. pointer
+		// to string) and that we want fast lookups when forming
+		// ClusterLoadAssignment's Endpoints
+		ip2zone map[uint32]string
 
 		// We can solve any problem by introducing an extra level of indirection
 		// — David Wheeler
@@ -133,6 +141,8 @@ var (
 		Name:      "events_backlog",
 		Help:      "Current CRD xlate events backlog.",
 	})
+
+	ipv4CIDRRE = regexp.MustCompile(`(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+)`)
 )
 
 func init() {
@@ -161,6 +171,8 @@ func Start(ctx context.Context, log log15.Logger,
 		lc:             new(ListenerConfig),
 		// statsListener set in initStatsListener
 		// statsCluster set in initStatsCluster
+		migrated:        make(map[*Ingress]struct{}),
+		ip2zone:         make(map[uint32]string),
 		cluster2ingress: make(map[string][]**Ingress),
 	}
 	handler.addSotW(xds.DefaultEnvoySubset, GatewayRole, nil)
@@ -244,23 +256,6 @@ func tlsDelegationMap(tlsDelegation TLSCertificateDelegation) map[string]map[str
 	return delegationMap
 }
 
-func endpointsIPs(kEndpoints *k8s.Endpoints) (ips []string) {
-	if kEndpoints == nil {
-		return
-	}
-
-	for _, subset := range kEndpoints.Subsets {
-		for _, address := range subset.Addresses {
-			if address.IP != "" {
-				ips = append(ips, address.IP)
-			} else if address.Hostname != "" {
-				ips = append(ips, address.Hostname)
-			}
-		}
-	}
-	return
-}
-
 func (recv *CRDHandler) OnAdd(iface interface{}) {
 	xlateEventsBacklog.Inc()
 	recv.events <- addEvent{iface}
@@ -304,57 +299,6 @@ func (recv *CRDHandler) InCharge() types.InChargeAnswer {
 
 	recv.log.Warn("No kapcom endpoints discovered yet")
 	return types.Unknown
-}
-
-func (recv *CRDHandler) addSecret(kSecret *k8s.Secret) (success bool) {
-	if kSecret.Type != k8s.SecretTypeTLS {
-		return
-	}
-
-	recv.secrets[SecretsKey(kSecret)] = kSecret
-	recv.log.Info("add/update Secret", "ns", kSecret.Namespace, "name", kSecret.Name)
-	success = true
-	return
-}
-
-func (recv *CRDHandler) deleteSecret(kSecret *k8s.Secret) (success bool) {
-	if _, exists := recv.secrets[SecretsKey(kSecret)]; exists {
-		recv.log.Info("delete Secret", "ns", kSecret.Namespace, "name", kSecret.Name)
-		delete(recv.secrets, SecretsKey(kSecret))
-		success = true
-	}
-	return
-}
-
-func (recv *CRDHandler) addCertDelegation(certDelegation TLSCertificateDelegation) (success bool) {
-	delegationName := tlsDelegationKey(certDelegation)
-	// A little bit of validation
-	if len(certDelegation.Delegations()) == 0 {
-		recv.log.Warn("TLSCertificateDelegation has no 'delegations'", "name", delegationName)
-		return
-	}
-
-	for _, d := range certDelegation.Delegations() {
-		if len(d.SecretName()) == 0 || len(d.TargetNamespaces()) == 0 {
-			recv.log.Warn("TLSCertificateDelegation: secretName and targetNamespaces are required", "name", delegationName)
-			return
-		}
-	}
-	recv.log.Info("add/update TLSCertificateDelegation", "name", delegationName)
-	recv.tlsDelegations[delegationName] = certDelegation
-
-	success = true
-	return
-}
-
-func (recv *CRDHandler) deleteCertDelegation(certDelegation TLSCertificateDelegation) (success bool) {
-	delegationName := tlsDelegationKey(certDelegation)
-	if _, exists := recv.tlsDelegations[delegationName]; exists {
-		recv.log.Info("delete TLSCertificateDelegation", "name", delegationName)
-		delete(recv.tlsDelegations, delegationName)
-		success = true
-	}
-	return
 }
 
 func (recv *CRDHandler) getNS(ns string) namespaceCRDs {
@@ -512,17 +456,22 @@ func (recv *CRDHandler) getSotWs(ingress *Ingress) []SotW {
 
 // given an Ingress or Service, or Endpoint, find the corresponding
 // Ingresses that are affected
+// low priority Ingresses cannot be "affected" and are filtered out
 func (recv *CRDHandler) getIngressList(ns, crdName string) []*Ingress {
 	iList := []*Ingress{}
 
 	for _, iMap := range recv.getNS(ns).ingressTypes {
 		if iPtr := iMap[crdName]; iPtr != nil {
-			iList = append(iList, *iPtr)
+			if recv.isHighestPriorityIngress(*iPtr) {
+				iList = append(iList, *iPtr)
+			}
 		}
 	}
 
 	for _, iPtr := range recv.cluster2ingress[serviceKey(ns, crdName)] {
-		iList = append(iList, *iPtr)
+		if recv.isHighestPriorityIngress(*iPtr) {
+			iList = append(iList, *iPtr)
+		}
 	}
 
 	return iList
@@ -880,59 +829,84 @@ func (recv *CRDHandler) checkFQDN(ingress *Ingress) {
 		if ingress == ingress2 {
 			return
 		}
+		// can't compare pointers when checking failed delegation
+		// during an update triggered by migration
+		if ingress.Name == ingress2.Name &&
+			ingress.Namespace == ingress2.Namespace &&
+			ingress.TypeURL == ingress2.TypeURL {
+			return
+		}
 
 		if ingress.Fqdn != "" &&
 			ingress.Class == ingress2.Class &&
 			ingress.Fqdn == ingress2.Fqdn {
 
-			recv.log.Warn("FQDN collision. ns1/name1 is rejected",
-				"ns1", ingress.Namespace, "name1", ingress.Name,
-				"ns2", ingress2.Namespace, "name2", ingress2.Name,
-				annotations.IC, ingress.Class,
-			)
-			ingress.SetInvalid(fmt.Sprintf("FQDN collision %s with %s in %s", ingress.Fqdn, ingress2.Name, ingress2.Namespace))
-			stop = true
-			return
+			// handle migration
+			if ingress.Analogous(ingress2) {
+				recv.log.Debug("ignoring analogous ingress (fqdn)",
+					"ns", ingress.Namespace, "name", ingress.Name,
+					"existing", ingress2.TypeURL, "new", ingress.TypeURL,
+					annotations.IC, ingress.Class,
+				)
+			} else {
+				recv.log.Warn("FQDN collision. ns1/name1 is rejected",
+					"ns1", ingress.Namespace, "name1", ingress.Name,
+					"ns2", ingress2.Namespace, "name2", ingress2.Name,
+					annotations.IC, ingress.Class,
+				)
+				ingress.SetInvalid(fmt.Sprintf("FQDN collision %s with %s in %s", ingress.Fqdn, ingress2.Name, ingress2.Namespace))
+				stop = true
+				return
+			}
 		}
 
 		if ingress2.VirtualHost.Domains != nil &&
 			ingress.Class == ingress2.Class {
 
-			// check domains in other Ingresses
-			for _, d := range ingress2.VirtualHost.Domains {
-				if _, exists := ingressDomains[d]; exists {
-					recv.log.Warn("Domain collision. ns1/name1 is rejected",
-						"ns1", ingress.Namespace, "name1", ingress.Name,
-						"ns2", ingress2.Namespace, "name2", ingress2.Name,
-						annotations.IC, ingress.Class,
-					)
-					ingress.SetInvalid(fmt.Sprintf("Hosts collision '%s' with %s in %s", d, ingress2.Name, ingress2.Namespace))
-					stop = true
-					return
-				}
-				// check fqdn against these domains
-				if ingress.Fqdn == d {
-					recv.log.Warn("Fqdn/domain collision. ns1/name1 is rejected",
-						"ns1", ingress.Namespace, "name1", ingress.Name,
-						"ns2", ingress2.Namespace, "name2", ingress2.Name,
-						annotations.IC, ingress.Class,
-					)
-					ingress.SetInvalid(fmt.Sprintf("Fqdn/hosts collision '%s' with %s in %s", ingress.Fqdn, ingress2.Name, ingress2.Namespace))
-					stop = true
-					return
-				}
-			}
-
-			// check fqdn in other Ingresses
-			if _, exists := ingressDomains[ingress2.Fqdn]; exists {
-				recv.log.Warn("Domain/fqdn collision. ns1/name1 is rejected",
-					"ns1", ingress.Namespace, "name1", ingress.Name,
-					"ns2", ingress2.Namespace, "name2", ingress2.Name,
+			// handle migration
+			if ingress.Analogous(ingress2) {
+				recv.log.Debug("ignoring analogous ingress (domains)",
+					"ns", ingress.Namespace, "name", ingress.Name,
+					"existing", ingress2.TypeURL, "new", ingress.TypeURL,
 					annotations.IC, ingress.Class,
 				)
-				ingress.SetInvalid(fmt.Sprintf("Hosts/fqdn collision '%s' with %s in %s", ingress2.Fqdn, ingress2.Name, ingress2.Namespace))
-				stop = true
-				return
+			} else {
+				// check domains in other Ingresses
+				for _, d := range ingress2.VirtualHost.Domains {
+					if _, exists := ingressDomains[d]; exists {
+						recv.log.Warn("Domain collision. ns1/name1 is rejected",
+							"ns1", ingress.Namespace, "name1", ingress.Name,
+							"ns2", ingress2.Namespace, "name2", ingress2.Name,
+							annotations.IC, ingress.Class,
+						)
+						ingress.SetInvalid(fmt.Sprintf("Hosts collision '%s' with %s in %s", d, ingress2.Name, ingress2.Namespace))
+						stop = true
+						return
+					}
+					// check fqdn against these domains
+					if ingress.Fqdn == d {
+						recv.log.Warn("Fqdn/domain collision. ns1/name1 is rejected",
+							"ns1", ingress.Namespace, "name1", ingress.Name,
+							"ns2", ingress2.Namespace, "name2", ingress2.Name,
+							annotations.IC, ingress.Class,
+						)
+						ingress.SetInvalid(fmt.Sprintf("Fqdn/hosts collision '%s' with %s in %s", ingress.Fqdn, ingress2.Name, ingress2.Namespace))
+						stop = true
+						return
+					}
+				}
+
+				// check fqdn in other Ingresses
+				if _, exists := ingressDomains[ingress2.Fqdn]; exists {
+					recv.log.Warn("Domain/fqdn collision. ns1/name1 is rejected",
+						"ns1", ingress.Namespace, "name1", ingress.Name,
+						"ns2", ingress2.Namespace, "name2", ingress2.Name,
+						annotations.IC, ingress.Class,
+					)
+					ingress.SetInvalid(fmt.Sprintf("Hosts/fqdn collision '%s' with %s in %s", ingress2.Fqdn, ingress2.Name, ingress2.Namespace))
+					stop = true
+					return
+				}
 			}
 		}
 		return
@@ -1056,7 +1030,7 @@ func (recv *CRDHandler) updateStatus(ingress *Ingress) {
 	}
 }
 
-func (recv *CRDHandler) delegatorsFunc(possibleDelegate *Ingress) func() {
+func (recv *CRDHandler) delegatorsFunc(possibleDelegate *Ingress) func(bool) {
 
 	possibleDelegators := make(map[*Ingress]interface{})
 	// Ensure that we capture any Ingresses that have delegates
@@ -1085,9 +1059,12 @@ func (recv *CRDHandler) delegatorsFunc(possibleDelegate *Ingress) func() {
 		return
 	})
 
-	return func() {
+	return func(triggerXDS bool) {
 		for ingress := range possibleDelegators {
 			recv.mutateIngress(ingress, nil)
+			if !triggerXDS {
+				continue
+			}
 
 			if ingress.Valid() {
 				recv.updateRDS(ingress, nil)
@@ -1100,7 +1077,7 @@ func (recv *CRDHandler) delegatorsFunc(possibleDelegate *Ingress) func() {
 	}
 }
 
-func (recv *CRDHandler) checkFailedDelegations(ingress *Ingress) {
+func (recv *CRDHandler) checkFailedDelegations(ingress *Ingress, triggerXDS bool) {
 	nsCRDs := recv.getNS(ingress.Namespace)
 	if iPtrList := nsCRDs.failedDelegations[ingress.Name]; iPtrList != nil {
 		// make a copy because failedDelegations and
@@ -1109,9 +1086,15 @@ func (recv *CRDHandler) checkFailedDelegations(ingress *Ingress) {
 		iPtrListCopy := make([]**Ingress, len(iPtrList))
 		copy(iPtrListCopy, iPtrList)
 		for _, iPtr := range iPtrListCopy {
+			// ignore failed delegations that have the same name but a different type
+			if (*iPtr).TypeURL != ingress.TypeURL {
+				continue
+			}
 			recv.log.Debug("mutating Ingress for failed delegation")
 			recv.mutateIngress(*iPtr, nil)
-			recv.updateRDS(*iPtr, nil)
+			if triggerXDS {
+				recv.updateRDS(*iPtr, nil)
+			}
 		}
 	}
 }
@@ -1238,10 +1221,15 @@ func (recv *CRDHandler) CleanupXDS() {
 				xds.MapTCPProxyClusters(recv.log, l, func(clusterName string) {
 					activeCDS[clusterName] = nil
 				})
+
+				xds.MapGRPCALSClusters(recv.log, l, func(clusterName string) {
+					activeCDS[clusterName] = nil
+				})
 			})
 		}
 
-		// everything left behind in sotw minus all that's actually programmed
+		// everything left behind in CDS SotW minus all that's actually
+		// programmed in RDS/LDS SotW references to CDS entries
 		leftoverCDS := set.Difference(sotw.cds, activeCDS)
 		delete(leftoverCDS, constants.StatsCluster)
 		delete(leftoverCDS, constants.ExtAuthzCluster)
@@ -1266,6 +1254,240 @@ func (recv *CRDHandler) CleanupXDS() {
 			recv.updateSotW(sotw.subset, xds.EndpointType, sotw.eds)
 		}
 	}
+}
+
+func (recv *CRDHandler) addIngress(ingress *Ingress) {
+	log := recv.log
+
+	nsCRDs := recv.getNS(ingress.Namespace)
+	if !nsCRDs.addIngress(log, recv.lc, ingress) {
+		return
+	}
+	recv.mutateIngress(ingress, nil)
+	log.Debug("add Ingress",
+		"cluster2ingress", recv.cluster2ingress,
+		"name", ingress.Name, "type", ingress.TypeURL)
+
+	if recv.migrateIngress(ingress, nil) {
+		if ingress.Valid() {
+			recv.checkFailedDelegations(ingress, !doTriggerXDS)
+		}
+		return
+	}
+
+	if ingress.Valid() {
+		recv.updateCDS(ingress.Namespace, ingress.Name)
+		recv.updateEDS(ingress.Namespace, ingress.Name)
+		recv.updateLDS(ingress, nil)
+		recv.updateRDS(ingress, nil)
+		recv.updateSDS(ingress, nil)
+		recv.checkFailedDelegations(ingress, doTriggerXDS)
+	}
+}
+
+func (recv *CRDHandler) updateIngress(old, new *Ingress) {
+	log := recv.log
+
+	// we get updates for Ingresses with a ingress class other
+	// than what we're configured to handle
+	//
+	// if we were previously tracking this Ingress then delete it
+	//
+	// otherwise there's nothing to do
+	if !recv.getNS(new.Namespace).addIngress(log, recv.lc, new) {
+		iPtr := recv.getNS(new.Namespace).getIngressPtr(new)
+		if iPtr == nil {
+			return
+		} else {
+			recv.OnDelete(new)
+		}
+	}
+
+	// capture possible delegators so we can process them
+	// after new is mutated
+	df := recv.delegatorsFunc(old)
+
+	recv.mutateIngress(new, old)
+
+	if recv.migrateIngress(new, old) {
+		df(!doTriggerXDS)
+		if new.Valid() {
+			recv.checkFailedDelegations(new, !doTriggerXDS)
+		}
+		return
+	}
+
+	df(doTriggerXDS)
+
+	if new.Valid() {
+		recv.updateCDS(new.Namespace, new.Name)
+		recv.updateEDS(new.Namespace, new.Name)
+		recv.updateLDS(new, old)
+		recv.updateRDS(new, old)
+		recv.updateSDS(new, old)
+		recv.checkFailedDelegations(new, doTriggerXDS)
+	} else {
+		recv.removeFilterChainMatch(old)
+		recv.removeVirtualHost(old)
+	}
+}
+
+func (recv *CRDHandler) deleteIngress(ingress *Ingress) {
+	// we get deletions for Ingresses with a ingress class other
+	// than what we're configured to handle
+	//
+	// if we weren't previously tracking this Ingress then
+	// there's nothing to do
+	if iPtr := recv.getNS(ingress.Namespace).getIngressPtr(ingress); iPtr == nil {
+		return
+	}
+
+	df := recv.delegatorsFunc(ingress)
+
+	recv.mutateIngress(nil, ingress)
+
+	recv.getNS(ingress.Namespace).deleteIngress(recv.log, ingress)
+	recv.removeUnreferencedSecrets(ingress)
+	recv.cleanupFailedDelegations(ingress)
+
+	if recv.migrateIngress(nil, ingress) {
+		df(!doTriggerXDS)
+		return
+	}
+
+	recv.removeFilterChainMatch(ingress)
+	recv.removeVirtualHost(ingress)
+
+	df(doTriggerXDS)
+}
+
+func (recv *CRDHandler) addUpdateService(service *k8s.Service) {
+	recv.getNS(service.Namespace).addService(recv.log, service)
+
+	recv.updateCDS(service.Namespace, service.Name)
+
+	// Service can arrive after Endpoints
+	recv.updateEDS(service.Namespace, service.Name)
+
+	// Service is needed to form the cluster name and weights
+	// attached to the Route
+	recv.updateRDS(service, nil)
+
+	// In a Gateway, Service is needed to form the cluster name
+	// and weights attached to a TCP proxy
+	//
+	// In a Sidecar, Service's ServicePort is used for the
+	// Listener's port
+	recv.updateLDS(service, nil)
+}
+
+// CDS and EDS SotWs are handled in CleanupXDS
+func (recv *CRDHandler) deleteService(service *k8s.Service) {
+
+	recv.getNS(service.Namespace).deleteService(recv.log, service)
+
+	// Service is needed to form the cluster name and weights
+	// attached to the Route
+	recv.updateRDS(service, nil)
+
+	// In a Gateway, Service is needed to form the cluster name
+	// and weights attached to a TCP proxy
+	//
+	// In a Sidecar, Service's ServicePort is used for the
+	// Listener's port
+	recv.updateLDS(service, nil)
+}
+
+func (recv *CRDHandler) addNode(node *k8s.Node) {
+	zone := node.Labels[constants.TopologyZoneLabel]
+	if zone == "" {
+		recv.log.Info("missing/empty node label "+constants.TopologyZoneLabel, "node", node.Name)
+		return
+	}
+
+	matches := ipv4CIDRRE.FindStringSubmatch(node.Spec.PodCIDR)
+	if len(matches) != 6 {
+		recv.log.Warn("bad node podCIDR", "podCIDR", node.Spec.PodCIDR, "node", node.Name)
+		return
+	}
+
+	// ["172.18.18.0/24" "172" "18" "18" "0" "24"] = FindStringSubmatch("172.18.18.0/24")
+	o1, err1 := strconv.Atoi(matches[1]) // first capture group
+	o2, err2 := strconv.Atoi(matches[2])
+	o3, err3 := strconv.Atoi(matches[3])
+	o4, err4 := strconv.Atoi(matches[4])
+	mask, err5 := strconv.Atoi(matches[5])
+
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || err5 != nil {
+		recv.log.Warn("strconv.Atoi",
+			"o1", o1, "err1", err1,
+			"o2", o2, "err2", err2,
+			"o3", o3, "err3", err3,
+			"o4", o4, "err4", err4,
+			"mask", mask, "err5", err5,
+		)
+		return
+	}
+
+	recv.log.Info("added Node", "name", node.Name, "podCIDR", matches[0], "zone", zone)
+
+	ipv4 := uint32(o1)<<24 | uint32(o2)<<16 | uint32(o3)<<8 | uint32(o4)
+
+	var i uint32 = 1                  // exclude the network itself
+	for ; i < (1<<(32-mask))-1; i++ { // exclude the broadcast address
+		recv.ip2zone[ipv4|i] = zone
+	}
+}
+
+func (recv *CRDHandler) addSecret(kSecret *k8s.Secret) (success bool) {
+	if kSecret.Type != k8s.SecretTypeTLS {
+		return
+	}
+
+	recv.secrets[SecretsKey(kSecret)] = kSecret
+	recv.log.Info("add/update Secret", "ns", kSecret.Namespace, "name", kSecret.Name)
+	success = true
+	return
+}
+
+func (recv *CRDHandler) deleteSecret(kSecret *k8s.Secret) (success bool) {
+	if _, exists := recv.secrets[SecretsKey(kSecret)]; exists {
+		recv.log.Info("delete Secret", "ns", kSecret.Namespace, "name", kSecret.Name)
+		delete(recv.secrets, SecretsKey(kSecret))
+		success = true
+	}
+	return
+}
+
+func (recv *CRDHandler) addCertDelegation(certDelegation TLSCertificateDelegation) (success bool) {
+	delegationName := tlsDelegationKey(certDelegation)
+	// A little bit of validation
+	if len(certDelegation.Delegations()) == 0 {
+		recv.log.Warn("TLSCertificateDelegation has no 'delegations'", "name", delegationName)
+		return
+	}
+
+	for _, d := range certDelegation.Delegations() {
+		if len(d.SecretName()) == 0 || len(d.TargetNamespaces()) == 0 {
+			recv.log.Warn("TLSCertificateDelegation: secretName and targetNamespaces are required", "name", delegationName)
+			return
+		}
+	}
+	recv.log.Info("add/update TLSCertificateDelegation", "name", delegationName)
+	recv.tlsDelegations[delegationName] = certDelegation
+
+	success = true
+	return
+}
+
+func (recv *CRDHandler) deleteCertDelegation(certDelegation TLSCertificateDelegation) (success bool) {
+	delegationName := tlsDelegationKey(certDelegation)
+	if _, exists := recv.tlsDelegations[delegationName]; exists {
+		recv.log.Info("delete TLSCertificateDelegation", "name", delegationName)
+		delete(recv.tlsDelegations, delegationName)
+		success = true
+	}
+	return
 }
 
 func (recv *CRDHandler) loop(ctx context.Context, exitChan chan<- uint8, syncChan chan<- struct{}) {
@@ -1315,6 +1537,9 @@ func (recv *CRDHandler) loop(ctx context.Context, exitChan chan<- uint8, syncCha
 			} else {
 				if lastAdd == enterLoopTime {
 					log.Warn("no addEvents. assuming K8s connectivity issue and preventing xDS communication")
+					syncTimer.Reset(time.Second)
+				} else if config.MTLS() && !recv.canMTLS() {
+					log.Warn("waiting for mTLS capability")
 					syncTimer.Reset(time.Second)
 				} else {
 					log.Info("closing syncChan", "addCountTotal", addCountTotal)
@@ -1369,46 +1594,18 @@ func (recv *CRDHandler) loop(ctx context.Context, exitChan chan<- uint8, syncCha
 					}
 
 				case *Ingress:
-					nsCRDs := recv.getNS(crd.Namespace)
-					if nsCRDs.addIngress(log, recv.lc, crd) {
-						recv.mutateIngress(crd, nil)
-						log.Debug("add Ingress",
-							"cluster2ingress", recv.cluster2ingress,
-							"name", crd.Name, "type", crd.TypeURL)
-
-						if crd.Valid() {
-							recv.updateCDS(crd.Namespace, crd.Name)
-							recv.updateEDS(crd.Namespace, crd.Name)
-							recv.updateLDS(crd, nil)
-							recv.updateRDS(crd, nil)
-							recv.updateSDS(crd, nil)
-							recv.checkFailedDelegations(crd)
-						}
-					}
+					recv.addIngress(crd)
 
 				case *k8s.Service:
-					recv.getNS(crd.Namespace).addService(log, crd)
-
-					recv.updateCDS(crd.Namespace, crd.Name)
-
-					// Service can arrive after Endpoints
-					recv.updateEDS(crd.Namespace, crd.Name)
-
-					// Service is needed to form the cluster name and weights
-					// attached to the Route
-					recv.updateRDS(crd, nil)
-
-					// In a Gateway, Service is needed to form the cluster name
-					// and weights attached to a TCP proxy
-					//
-					// In a Sidecar, Service's ServicePort is used for the
-					// Listener's port
-					recv.updateLDS(crd, nil)
+					recv.addUpdateService(crd)
 
 				case *k8s.Endpoints:
 					recv.getNS(crd.Namespace).addEndpoints(log, crd)
 					recv.updateCDS(crd.Namespace, crd.Name) // dynamic circuit breaking
 					recv.updateEDS(crd.Namespace, crd.Name)
+
+				case *k8s.Node:
+					recv.addNode(crd)
 
 				case *k8s.Secret:
 					if recv.addSecret(crd) {
@@ -1433,12 +1630,16 @@ func (recv *CRDHandler) loop(ctx context.Context, exitChan chan<- uint8, syncCha
 									if ok1 || ok2 {
 										recv.mutateIngress(ingress, nil)
 										if ingress.Valid() {
+											if !recv.isHighestPriorityIngress(ingress) {
+												recv.checkFailedDelegations(ingress, !doTriggerXDS)
+												return
+											}
 											recv.updateCDS(ingress.Namespace, ingress.Name)
 											recv.updateEDS(ingress.Namespace, ingress.Name)
 											recv.updateLDS(ingress, nil)
 											recv.updateRDS(ingress, nil)
 											recv.updateSDS(ingress, nil)
-											recv.checkFailedDelegations(ingress)
+											recv.checkFailedDelegations(ingress, doTriggerXDS)
 										}
 									}
 								}
@@ -1466,68 +1667,19 @@ func (recv *CRDHandler) loop(ctx context.Context, exitChan chan<- uint8, syncCha
 			case updateEvent:
 				switch crd := event.new.(type) {
 				case *Ingress:
-
-					// we get updates for Ingresses with a ingress class other
-					// than what we're configured to handle
-					//
-					// if we were previously tracking this Ingress then delete it
-					//
-					// otherwise there's nothing to do
-					if !recv.getNS(crd.Namespace).addIngress(log, recv.lc, crd) {
-						iPtr := recv.getNS(crd.Namespace).getIngressPtr(crd)
-						if iPtr == nil {
-							continue
-						} else {
-							recv.OnDelete(crd)
-						}
-					}
-
 					crdOld := event.old.(*Ingress)
-
-					// capture possible delegators so we can process them
-					// after crd is mutated
-					df := recv.delegatorsFunc(crdOld)
-
-					recv.mutateIngress(crd, crdOld)
-
-					df()
-
-					if crd.Valid() {
-						recv.updateCDS(crd.Namespace, crd.Name)
-						recv.updateEDS(crd.Namespace, crd.Name)
-						recv.updateLDS(crd, crdOld)
-						recv.updateRDS(crd, crdOld)
-						recv.updateSDS(crd, crdOld)
-						recv.checkFailedDelegations(crd)
-					} else {
-						recv.removeFilterChainMatch(crdOld)
-						recv.removeVirtualHost(crdOld)
-					}
+					recv.updateIngress(crdOld, crd)
 
 				case *k8s.Service:
-					recv.getNS(crd.Namespace).addService(log, crd)
-
-					recv.updateCDS(crd.Namespace, crd.Name)
-
-					// Changes to the Service object can cause a different
-					// ClusterName() to be formed
-					recv.updateEDS(crd.Namespace, crd.Name)
-
-					// Service is needed to form the cluster name and weights
-					// attached to the Route
-					recv.updateRDS(crd, nil)
-
-					// In a Gateway, Service is needed to form the cluster name
-					// and weights attached to a TCP proxy
-					//
-					// In a Sidecar, Service's ServicePort is used for the
-					// Listener's port
-					recv.updateLDS(crd, nil)
+					recv.addUpdateService(crd)
 
 				case *k8s.Endpoints:
 					recv.getNS(crd.Namespace).addEndpoints(log, crd)
 					recv.updateCDS(crd.Namespace, crd.Name) // dynamic circuit breaking
 					recv.updateEDS(crd.Namespace, crd.Name)
+
+				case *k8s.Node:
+					recv.addNode(crd)
 
 				case *k8s.Secret:
 					if recv.addSecret(crd) {
@@ -1556,12 +1708,16 @@ func (recv *CRDHandler) loop(ctx context.Context, exitChan chan<- uint8, syncCha
 									if ok1 || ok2 {
 										recv.mutateIngress(ingress, nil)
 										if ingress.Valid() {
+											if !recv.isHighestPriorityIngress(ingress) {
+												recv.checkFailedDelegations(ingress, !doTriggerXDS)
+												return
+											}
 											recv.updateCDS(ingress.Namespace, ingress.Name)
 											recv.updateEDS(ingress.Namespace, ingress.Name)
 											recv.updateLDS(ingress, nil) //e.g. remove it!
 											recv.updateRDS(ingress, nil)
 											recv.updateSDS(ingress, nil)
-											recv.checkFailedDelegations(ingress)
+											recv.checkFailedDelegations(ingress, doTriggerXDS)
 										}
 									}
 								}
@@ -1585,7 +1741,11 @@ func (recv *CRDHandler) loop(ctx context.Context, exitChan chan<- uint8, syncCha
 										ingressOld := ingress.DeepCopy()
 										df := recv.delegatorsFunc(ingressOld)
 										recv.mutateIngress(ingress, ingressOld)
-										df()
+										if !recv.isHighestPriorityIngress(ingress) {
+											df(!doTriggerXDS)
+											return
+										}
+										df(doTriggerXDS)
 										if !ingress.Valid() {
 											recv.removeFilterChainMatch(ingressOld)
 											recv.removeVirtualHost(ingressOld)
@@ -1616,45 +1776,16 @@ func (recv *CRDHandler) loop(ctx context.Context, exitChan chan<- uint8, syncCha
 			case deleteEvent:
 				switch crd := event.iface.(type) {
 				case *Ingress:
+					recv.deleteIngress(crd)
 
-					// we get deletions for Ingresses with a ingress class other
-					// than what we're configured to handle
-					//
-					// if we weren't previously tracking this Ingress then
-					// there's nothing to do
-					if iPtr := recv.getNS(crd.Namespace).getIngressPtr(crd); iPtr == nil {
-						continue
-					}
-
-					df := recv.delegatorsFunc(crd)
-
-					recv.mutateIngress(nil, crd)
-
-					recv.getNS(crd.Namespace).deleteIngress(log, crd)
-					recv.removeFilterChainMatch(crd)
-					recv.removeVirtualHost(crd)
-					recv.removeUnreferencedSecrets(crd)
-					recv.cleanupFailedDelegations(crd)
-
-					df()
-
-				case *k8s.Service: // CDS and EDS SotWs are handled in CleanupXDS
-
-					recv.getNS(crd.Namespace).deleteService(log, crd)
-
-					// Service is needed to form the cluster name and weights
-					// attached to the Route
-					recv.updateRDS(crd, nil)
-
-					// In a Gateway, Service is needed to form the cluster name
-					// and weights attached to a TCP proxy
-					//
-					// In a Sidecar, Service's ServicePort is used for the
-					// Listener's port
-					recv.updateLDS(crd, nil)
+				case *k8s.Service:
+					recv.deleteService(crd)
 
 				case *k8s.Endpoints: // CDS and EDS SotWs are handled in CleanupXDS
 					recv.getNS(crd.Namespace).deleteEndpoints(log, crd)
+
+				case *k8s.Node:
+					// TODO(bcook) recv.deleteNode?
 
 				case *k8s.Secret:
 					// don't delete a Secret just because we're told to
@@ -1703,7 +1834,11 @@ func (recv *CRDHandler) loop(ctx context.Context, exitChan chan<- uint8, syncCha
 										ingressOld := ingress.DeepCopy()
 										df := recv.delegatorsFunc(ingressOld)
 										recv.mutateIngress(ingress, ingressOld)
-										df()
+										if !recv.isHighestPriorityIngress(ingress) {
+											df(!doTriggerXDS)
+											return
+										}
+										df(doTriggerXDS)
 										if !ingress.Valid() {
 											recv.removeFilterChainMatch(ingressOld)
 											recv.removeVirtualHost(ingressOld)

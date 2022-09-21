@@ -47,11 +47,16 @@ type (
 		LibraryPath       string  `json:"library_path,omitempty"`
 	}
 
+	HTTPConnectionManager struct {
+		StreamIdleTimeout types.Duration `json:"stream_idle_timeout"`
+	}
+
 	IngressClass struct {
-		Ports         map[string]PortInfo `json:"ports"`
-		DefaultCert   string              `json:"default_cert"`
-		MinTLSVersion string              `json:"min_tls_version"`
-		Tracing       *Tracing            `json:"tracing"`
+		Ports                 map[string]PortInfo   `json:"ports"`
+		DefaultCert           string                `json:"default_cert"`
+		MinTLSVersion         string                `json:"min_tls_version"`
+		Tracing               *Tracing              `json:"tracing"`
+		HTTPConnectionManager HTTPConnectionManager `json:"http_connection_manager"`
 	}
 
 	Stats struct {

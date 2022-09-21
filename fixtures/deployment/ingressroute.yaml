@@ -74,6 +74,29 @@ items:
           unhealthyThresholdCount: 3
         name: hello
         port: 3001
+    - match: "/source_ip_policy"
+      permitInsecure: true
+      prefixRewrite: "/"
+      services:
+      - name: hello2
+        port: 3002
+      hashPolicy:
+      - connectionProperties:
+          sourceIp: true
+
+    - match: "/cookie_policy/"
+      permitInsecure: true
+      prefixRewrite: "/"
+      services:
+      - name: hello2
+        port: 3002
+      hashPolicy:
+      - cookie:
+          name: affinity
+          path: /
+          ttl: 1m0s
+        terminal: true
+
     - match: "/http2/"
       permitInsecure: true
       prefixRewrite: "/"

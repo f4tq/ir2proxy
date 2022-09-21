@@ -23,7 +23,9 @@ import (
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	trace "github.com/envoyproxy/go-control-plane/envoy/config/trace/v3"
 	file_log "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
+	grpc_log "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
 	ext_authz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
+	header_to_metadata "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
 	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcp_proxy "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
@@ -65,6 +67,7 @@ const (
 	optRateLimit
 	optGWAuthz
 	optCORS
+	optGRPCALS
 )
 
 var (
@@ -94,6 +97,9 @@ func getHCMOpts(ingress *Ingress) (opts hcmOpts) {
 	}
 	if ingress.VirtualHost.Cors != nil {
 		opts |= optCORS
+	}
+	if len(ingress.VirtualHost.Logging.Loggers) > 0 {
+		opts |= optGRPCALS
 	}
 	for _, route := range ingress.VirtualHost.ResolvedRoutes() {
 		if pfc := route.PerFilterConfig; pfc != nil {
@@ -157,9 +163,124 @@ func sniEqual(fc1, fc2 *listener.FilterChain) (answer bool) {
 	return
 }
 
-func tracing(log log15.Logger, lc *ListenerConfig, class string) (hcmT *hcm.HttpConnectionManager_Tracing) {
-	if cfg := lc.IngressClasses[class].Tracing; cfg != nil {
-		hcmT = new(hcm.HttpConnectionManager_Tracing)
+func jsonAccessLog(log log15.Logger, http bool) *accesslog.AccessLog {
+	var logFields map[string]*_struct.Value
+	if http {
+		logFields = logFieldsHTTP
+	} else {
+		logFields = logFieldsTCP
+	}
+
+	return &accesslog.AccessLog{
+		Name: wellknown.FileAccessLog,
+		ConfigType: &accesslog.AccessLog_TypedConfig{
+			util.ToAny(log, &file_log.FileAccessLog{
+				Path: "/dev/stdout",
+				AccessLogFormat: &file_log.FileAccessLog_LogFormat{
+					LogFormat: &core.SubstitutionFormatString{
+						Format: &core.SubstitutionFormatString_JsonFormat{
+							JsonFormat: &_struct.Struct{
+								Fields: logFields,
+							},
+						},
+					},
+				},
+			}),
+		},
+	}
+}
+
+//mExtAuthz - is sidecar only authz
+func mExtAuthz(eaz *crds.ExtAuthz) hcmMutator {
+	return func(log log15.Logger, hcmConfig *hcm.HttpConnectionManager) {
+		if eaz == nil {
+			return
+		}
+
+		eazFilter := &hcm.HttpFilter{
+			Name: wellknown.HTTPExternalAuthorization,
+			ConfigType: &hcm.HttpFilter_TypedConfig{
+				TypedConfig: util.ToAny(log, &ext_authz.ExtAuthz{
+					Services: &ext_authz.ExtAuthz_GrpcService{
+						GrpcService: &core.GrpcService{
+							TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+								EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
+									ClusterName: constants.ExtAuthzCluster,
+								},
+							},
+						},
+					},
+					FailureModeAllow:    eaz.FailureModeAllow,
+					TransportApiVersion: core.ApiVersion_V3,
+				}),
+			},
+		}
+
+		hcmConfig.HttpFilters = append(hcmConfig.HttpFilters, eazFilter)
+	}
+}
+
+func mStatPrefix(statPrefix string) hcmMutator {
+	return func(log log15.Logger, hcmConfig *hcm.HttpConnectionManager) {
+		if statPrefix != "" {
+			hcmConfig.StatPrefix = statPrefix
+		}
+	}
+}
+
+func mStreamIdleTimeout(ic IngressClass) hcmMutator {
+	return func(log log15.Logger, hcmConfig *hcm.HttpConnectionManager) {
+		if dur := ic.HTTPConnectionManager.StreamIdleTimeout.Duration; dur != 0 {
+			hcmConfig.StreamIdleTimeout = ptypes.DurationProto(dur)
+		}
+	}
+}
+
+func mGRPCALS(ingress *Ingress) hcmMutator {
+	return func(log log15.Logger, hcmConfig *hcm.HttpConnectionManager) {
+		if len(ingress.VirtualHost.Logging.Loggers) == 0 {
+			return
+		}
+
+		grpcLogger := ingress.VirtualHost.Logging.Loggers[0].GRPC
+		if grpcLogger == nil {
+			return
+		}
+
+		grpcALS := &accesslog.AccessLog{
+			Name: wellknown.HTTPGRPCAccessLog,
+			ConfigType: &accesslog.AccessLog_TypedConfig{
+				TypedConfig: util.ToAny(log, &grpc_log.HttpGrpcAccessLogConfig{
+					CommonConfig: &grpc_log.CommonGrpcAccessLogConfig{
+						TransportApiVersion: core.ApiVersion_V3,
+						LogName:             ingress.Fqdn,
+						GrpcService: &core.GrpcService{
+							TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+								EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
+									ClusterName: GRPCClusterName(grpcLogger),
+								},
+							},
+							Timeout: ptypes.DurationProto(time.Second),
+						},
+						// TODO(bcook)
+						// GrpcStreamRetryPolicy
+					},
+				}),
+			},
+		}
+		hcmConfig.AccessLog = append(hcmConfig.AccessLog, grpcALS)
+	}
+}
+
+func mTracing(lc *ListenerConfig, class string) hcmMutator {
+	return func(log log15.Logger, hcmConfig *hcm.HttpConnectionManager) {
+		cfg := lc.IngressClasses[class].Tracing
+		if cfg == nil {
+			return
+		}
+
+		hcmT := new(hcm.HttpConnectionManager_Tracing)
+		hcmConfig.Tracing = hcmT
 
 		if validPercent(cfg.ClientSampling) {
 			hcmT.ClientSampling = &envoy_type.Percent{Value: cfg.ClientSampling}
@@ -249,70 +370,9 @@ func tracing(log log15.Logger, lc *ListenerConfig, class string) (hcmT *hcm.Http
 			},
 		}
 	}
-	return
 }
 
-func jsonAccessLog(log log15.Logger, http bool) *accesslog.AccessLog {
-	var logFields map[string]*_struct.Value
-	if http {
-		logFields = logFieldsHTTP
-	} else {
-		logFields = logFieldsTCP
-	}
-
-	return &accesslog.AccessLog{
-		Name: wellknown.FileAccessLog,
-		ConfigType: &accesslog.AccessLog_TypedConfig{
-			util.ToAny(log, &file_log.FileAccessLog{
-				Path: "/dev/stdout",
-				AccessLogFormat: &file_log.FileAccessLog_LogFormat{
-					LogFormat: &core.SubstitutionFormatString{
-						Format: &core.SubstitutionFormatString_JsonFormat{
-							JsonFormat: &_struct.Struct{
-								Fields: logFields,
-							},
-						},
-					},
-				},
-			}),
-		},
-	}
-}
-
-//mExtAuthz - is sidecar only authz
-func mExtAuthz(eaz *crds.ExtAuthz) hcmMutator {
-	return func(log log15.Logger, hcmConfig *hcm.HttpConnectionManager) {
-		if eaz == nil {
-			return
-		}
-
-		httpFilters := []*hcm.HttpFilter{
-			{
-				Name: wellknown.HTTPExternalAuthorization,
-				ConfigType: &hcm.HttpFilter_TypedConfig{
-					TypedConfig: util.ToAny(log, &ext_authz.ExtAuthz{
-						Services: &ext_authz.ExtAuthz_GrpcService{
-							GrpcService: &core.GrpcService{
-								TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
-									EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
-										ClusterName: constants.ExtAuthzCluster,
-									},
-								},
-							},
-						},
-						FailureModeAllow:    eaz.FailureModeAllow,
-						TransportApiVersion: core.ApiVersion_V3,
-					}),
-				},
-			},
-		}
-
-		// prepend httpFilters to existing hcmConfig.HttpFilters
-		hcmConfig.HttpFilters = append(httpFilters, hcmConfig.HttpFilters...)
-	}
-}
-
-func mOpts(opts hcmOpts, ingresses ...*Ingress) hcmMutator {
+func mMiscFilters(opts hcmOpts, ingresses ...*Ingress) hcmMutator {
 	return func(log log15.Logger, hcmConfig *hcm.HttpConnectionManager) {
 
 		httpFilters := []*hcm.HttpFilter{}
@@ -412,20 +472,15 @@ func mOpts(opts hcmOpts, ingresses ...*Ingress) hcmMutator {
 			}
 		}
 
-		// prepend httpFilters to existing hcmConfig.HttpFilters
-		hcmConfig.HttpFilters = append(httpFilters, hcmConfig.HttpFilters...)
+		hcmConfig.HttpFilters = append(hcmConfig.HttpFilters, httpFilters...)
 	}
 }
 
-func hcmFilter(log log15.Logger, lc *ListenerConfig,
-	class, listenerName, statPrefix string, mutators ...hcmMutator) *listener.Filter {
-
-	if statPrefix == "" {
-		statPrefix = listenerName
-	}
+func hcmFilter(log log15.Logger, listenerName string,
+	mutators ...hcmMutator) *listener.Filter {
 
 	hcmConfig := &hcm.HttpConnectionManager{
-		StatPrefix: statPrefix,
+		StatPrefix: listenerName,
 		ServerName: constants.ServerHeader,
 		RouteSpecifier: &hcm.HttpConnectionManager_Rds{
 			&hcm.Rds{
@@ -435,16 +490,6 @@ func hcmFilter(log log15.Logger, lc *ListenerConfig,
 		},
 		GenerateRequestId:   &wrappers.BoolValue{Value: false},
 		MaxRequestHeadersKb: &wrappers.UInt32Value{Value: 64},
-		HttpFilters: []*hcm.HttpFilter{
-			{
-				Name: wellknown.Router,
-				ConfigType: &hcm.HttpFilter_TypedConfig{
-					TypedConfig: util.ToAny(log, &router.Router{
-						SuppressEnvoyHeaders: true,
-					}),
-				},
-			},
-		},
 		HttpProtocolOptions: &core.Http1ProtocolOptions{
 			AcceptHttp_10: true,
 		},
@@ -455,11 +500,34 @@ func hcmFilter(log log15.Logger, lc *ListenerConfig,
 		NormalizePath:    &wrappers.BoolValue{Value: true},
 		RequestTimeout:   &duration.Duration{}, // disabled
 		MergeSlashes:     true,
-		Tracing:          tracing(log, lc, class),
 	}
+
 	for _, mutator := range mutators {
 		mutator(log, hcmConfig)
 	}
+
+	// ensure envoy.filters.http.header_to_metadata is first so subsequent
+	// filters can access metadata
+	htmf := &hcm.HttpFilter{
+		Name: constants.HeaderToMetadataFilter,
+		ConfigType: &hcm.HttpFilter_TypedConfig{
+			TypedConfig: util.ToAny(log, &header_to_metadata.Config{
+				// nothing to configure here we just need it for VirtualHosts
+			}),
+		},
+	}
+	hcmConfig.HttpFilters = append([]*hcm.HttpFilter{htmf}, hcmConfig.HttpFilters...)
+
+	// router is always last
+	routerFilter := &hcm.HttpFilter{
+		Name: wellknown.Router,
+		ConfigType: &hcm.HttpFilter_TypedConfig{
+			TypedConfig: util.ToAny(log, &router.Router{
+				SuppressEnvoyHeaders: true,
+			}),
+		},
+	}
+	hcmConfig.HttpFilters = append(hcmConfig.HttpFilters, routerFilter)
 
 	return &listener.Filter{
 		Name: wellknown.HTTPConnectionManager,
@@ -748,6 +816,11 @@ func (recv *CRDHandler) canBundle(i1, i2 *Ingress) (answer bool) {
 		return
 	}
 
+	// additional unique access logger on the HTTPConnectionManager
+	if (opt1&optGRPCALS) > 0 || (opt2&optGRPCALS) > 0 {
+		return
+	}
+
 	l1 := i1.Listener
 	l2 := i2.Listener
 
@@ -861,7 +934,11 @@ func (recv *CRDHandler) getGatewayListeners(sotw SotW, ingressClass string) []xd
 					fc := &listener.FilterChain{
 						Name: "default",
 						Filters: []*listener.Filter{
-							hcmFilter(recv.log, recv.lc, ingressClass, listenerName, "", mOpts(optAll)),
+							hcmFilter(recv.log, listenerName,
+								mMiscFilters(optAll),
+								mStreamIdleTimeout(ic),
+								mTracing(recv.lc, ingressClass),
+							),
 						},
 					}
 					lmeta.defaultFC = fc
@@ -971,14 +1048,22 @@ func (recv *CRDHandler) ingressToFilterChain(ingress *Ingress,
 		var opts hcmOpts
 
 		recv.mapIngresses(func(ingress2 *Ingress) (stop bool) {
-			if ingress2.Valid() && (ingress == ingress2 || recv.canBundle(ingress, ingress2)) {
+			if ingress2.Valid() &&
+				!ingress2.Analogous(ingress) &&
+				recv.isHighestPriorityIngress(ingress2) &&
+				(ingress == ingress2 || recv.canBundle(ingress, ingress2)) {
 				serverNames = append(serverNames, ingress2.Fqdn)
 				opts |= getHCMOpts(ingress2)
 			}
 			return
 		})
 		sort.Strings(serverNames)
-		f := hcmFilter(recv.log, recv.lc, ingress.Class, listenerName, "", mOpts(opts, ingress))
+		f := hcmFilter(recv.log, listenerName,
+			mMiscFilters(opts, ingress),
+			mStreamIdleTimeout(recv.lc.IngressClasses[ingress.Class]),
+			mTracing(recv.lc, ingress.Class),
+			mGRPCALS(ingress),
+		)
 		fc.Filters = append(fc.Filters, f)
 	} else {
 		serverNames = append(serverNames, ingress.Fqdn)
@@ -990,6 +1075,11 @@ func (recv *CRDHandler) ingressToFilterChain(ingress *Ingress,
 	}
 
 	if len(fc.Filters) == 0 {
+		fc = nil
+		return
+	}
+
+	if len(serverNames) == 0 {
 		fc = nil
 		return
 	}
@@ -1119,7 +1209,10 @@ func (recv *CRDHandler) updateGatewayLDS(sotw SotW, ingress, ingressOld *Ingress
 				l.FilterChains = []*listener.FilterChain{
 					{
 						Filters: []*listener.Filter{
-							hcmFilter(recv.log, recv.lc, ingress.Class, l.Name, "", mOpts(optAll)),
+							hcmFilter(recv.log, l.Name,
+								mMiscFilters(optAll),
+								mTracing(recv.lc, ingress.Class),
+							),
 						},
 					},
 				}
@@ -1192,8 +1285,12 @@ func (recv *CRDHandler) updateSidecarLDS(sotw SotW, ingress *Ingress) {
 			if isTCPProxy {
 				filter = tcpProxyFilter(recv.log, nsCRDs, ingress, listenerName, statPrefix)
 			} else {
-				filter = hcmFilter(recv.log, recv.lc, ingress.Class, listenerName, statPrefix,
-					mExtAuthz(sotw.sidecar.Spec.Filters.ExtAuthz), mOpts(optHealthCheck),
+				filter = hcmFilter(recv.log, listenerName,
+					mStatPrefix(statPrefix),
+					mMiscFilters(optHealthCheck),
+					mExtAuthz(sotw.sidecar.Spec.Filters.ExtAuthz),
+					mTracing(recv.lc, ingress.Class),
+					mGRPCALS(ingress),
 				)
 			}
 

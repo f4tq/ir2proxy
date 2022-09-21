@@ -2,7 +2,7 @@ module github.com/projectcontour/ir2proxy
 
 go 1.18
 
-replace kapcom.adobe.com v1.18.2 => git.corp.adobe.com/fortescu/kapcom v1.18.3-0.20220826192651-633eb5640a6c
+replace kapcom.adobe.com v1.18.2 => git.corp.adobe.com/fortescu/kapcom v1.20.2-0.20220921162302-26a7dc2c3410
 
 require (
 	github.com/ghodss/yaml v1.0.0

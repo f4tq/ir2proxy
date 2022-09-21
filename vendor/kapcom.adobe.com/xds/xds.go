@@ -132,6 +132,7 @@ func (recv *adsServerImpl) newEnvoyConnection() *envoyConnection {
 		streamId: streamId,
 		// nodeId not known until the first DiscoveryRequest
 		// nodeCluster not known until the first DiscoveryRequest
+		// detailedMetrics set elsewhere
 		// delta set elsewhere
 		// deltaChan set elsewhere
 		serverChanSend: recv.serverChanSend,

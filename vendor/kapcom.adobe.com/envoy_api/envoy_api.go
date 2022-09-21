@@ -106,16 +106,6 @@ type (
 		} `json:"health_status"`
 		Weight int `json:"weight"`
 	}
-
-	ClusterStatus struct {
-		Name         string       `json:"name"`
-		AddedViaAPI  bool         `json:"added_via_api"`
-		HostStatuses []HostStatus `json:"host_statuses"`
-	}
-
-	ClustersInfo struct {
-		ClusterStatuses []ClusterStatus `json:"cluster_statuses"`
-	}
 )
 
 type ApiRouteByName []ApiRoute
@@ -155,7 +145,7 @@ func (recv ApiSecretByName) Swap(i, j int) {
 }
 
 func GetConfigDump(log log15.Logger, endpoint string) (dump *ConfigDump, success bool) {
-	res, err := http.Get(endpoint + "/config_dump")
+	res, err := http.Get(endpoint + "/config_dump?include_eds")
 	if err != nil {
 		log.Error("http.Get", "Error", err)
 		return
@@ -194,31 +184,6 @@ func GetServerInfo(log log15.Logger, endpoint string) (serverInfo *ServerInfo, s
 		if !config.Testing() {
 			log.Error("json.Decode", "Error", err)
 		}
-		return
-	}
-
-	success = res.StatusCode == 200
-	return
-}
-
-func GetClusterEndpoints(log log15.Logger, endpoint string) (clustersInfo *ClustersInfo, success bool) {
-	req, err := http.NewRequest("GET", endpoint+"/clusters?format=json", nil)
-	if err != nil {
-		log.Error("http.NewRequest", "Error", err)
-		return
-	}
-
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Error("http.Get", "Error", err)
-		return
-	}
-	defer res.Body.Close()
-
-	clustersInfo = new(ClustersInfo)
-	err = json.NewDecoder(res.Body).Decode(clustersInfo)
-	if err != nil {
-		log.Error("json.Unmarshal", "Error", err)
 		return
 	}
 

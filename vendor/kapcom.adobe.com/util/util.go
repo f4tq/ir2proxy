@@ -10,6 +10,7 @@ import (
 	"github.com/golang/protobuf/ptypes"
 	"github.com/golang/protobuf/ptypes/any"
 	"github.com/ugorji/go/codec"
+	"google.golang.org/protobuf/types/known/structpb"
 	"gopkg.in/inconshreveable/log15.v2"
 )
 
@@ -22,13 +23,17 @@ func ToAny(log log15.Logger, msg proto.Message) *any.Any {
 }
 
 func FromAny(log log15.Logger, a *any.Any) proto.Message {
-	var x ptypes.DynamicAny
-	err := ptypes.UnmarshalAny(a, &x)
-	if err != nil {
+	if a == nil {
+		log.Debug("util.FromAny a == nil")
+		return nil
+	}
+
+	var da ptypes.DynamicAny
+	if err := ptypes.UnmarshalAny(a, &da); err != nil {
 		log.Error("ptypes.UnmarshalAny", "Error", err)
 		return nil
 	}
-	return x.Message
+	return da.Message
 }
 
 func EncodedHeaderValue(value string) string {
@@ -126,5 +131,66 @@ func Equal(log log15.Logger, a, b interface{}) (answer bool) {
 	}
 
 	answer = bytes.Equal(bufA.Bytes(), bufB.Bytes())
+	return
+}
+
+// RecurseIface is a *structpb.Value producing function that recurses into nested
+// structures
+func RecurseIface(s *structpb.Struct, iface interface{}) (ret *structpb.Value) {
+	// we ignore errors in types we know do not produce errors
+	// (i.e. the matching type in structpb.NewValue's second return is nil)
+	switch ifaceVal := iface.(type) {
+	case nil:
+		ret, _ = structpb.NewValue(iface)
+	case bool:
+		ret, _ = structpb.NewValue(iface)
+	case int:
+		ret, _ = structpb.NewValue(iface)
+	case int32:
+		ret, _ = structpb.NewValue(iface)
+	case int64:
+		ret, _ = structpb.NewValue(iface)
+	case uint:
+		ret, _ = structpb.NewValue(iface)
+	case uint32:
+		ret, _ = structpb.NewValue(iface)
+	case uint64:
+		ret, _ = structpb.NewValue(iface)
+	case float32:
+		ret, _ = structpb.NewValue(iface)
+	case float64:
+		ret, _ = structpb.NewValue(iface)
+	case string:
+		ret, _ = structpb.NewValue(iface)
+	case []byte:
+		ret, _ = structpb.NewValue(iface)
+	case map[string]interface{}:
+		if s == nil { // will only not be nil on the initial call
+			s = new(structpb.Struct)
+		}
+		if s.Fields == nil {
+			s.Fields = make(map[string]*structpb.Value)
+		}
+
+		for k, v := range ifaceVal {
+			s.Fields[k] = RecurseIface(nil, v)
+		}
+
+		ret = &structpb.Value{
+			Kind: &structpb.Value_StructValue{s},
+		}
+	case []interface{}:
+		lv := new(structpb.ListValue)
+		for _, v := range ifaceVal {
+			lv.Values = append(lv.Values, RecurseIface(nil, v))
+		}
+		ret = &structpb.Value{
+			Kind: &structpb.Value_ListValue{lv},
+		}
+	default:
+		ret = &structpb.Value{
+			Kind: &structpb.Value_NullValue{},
+		}
+	}
 	return
 }

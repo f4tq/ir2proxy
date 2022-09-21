@@ -4,18 +4,20 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"kapcom.adobe.com/constants"
 	"kapcom.adobe.com/constants/annotations"
 	"kapcom.adobe.com/envoy_api"
+	"kapcom.adobe.com/types"
 	"kapcom.adobe.com/util"
 	"kapcom.adobe.com/xlate"
 
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	authz_http "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
+	ext_authz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	matcher "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	wrapperspb "google.golang.org/protobuf/types/known/wrapperspb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,6 +26,8 @@ import (
 
 const (
 	corsRe = "^[a-zA-Z0-9!#$%&'*+.^_`|~-]+$"
+	// used for LoadBalancy Policy 'Cookie'
+	SessionCookie = "X-Contour-Session-Affinity"
 )
 
 var (
@@ -93,6 +97,10 @@ func serviceToCluster(service *Service, addlInfo interface{}) (xlate.Cluster, er
 	// the one defined on an TCPProxy and one defined on a Route, because certain
 	// policies aren't defined on services behind a TCPProxy
 	if tcpProxy, ok := addlInfo.(*TCPProxy); ok {
+		if tcpProxy.LoadBalancerPolicy != nil &&
+			contains(tcpProxy.LoadBalancerPolicy.Strategy, []string{"RequestHash", "Cookie"}) {
+			return c, fmt.Errorf("tcpproxy does not support loadbalancing policy %s", tcpProxy.LoadBalancerPolicy.Strategy)
+		}
 		err = addLBStrategyToCluster(&c, tcpProxy.LoadBalancerPolicy, tcpProxy.LeastRequestLbConfig)
 	} else if route, ok := addlInfo.(*Route); ok {
 		err = addLBStrategyToCluster(&c, route.LoadBalancerPolicy, route.LeastRequestLbConfig)
@@ -122,7 +130,19 @@ func addLBStrategyToCluster(c *xlate.Cluster, lbpolicy *LoadBalancerPolicy, leas
 		}
 	case "Random":
 		c.LbPolicy = cluster.Cluster_RANDOM
-	// case "RequestHash":
+	case "Cookie":
+		if len(lbpolicy.RequestHashPolicies) != 0 {
+			return errors.New("policy Cookie accepts no RequestHashPolies")
+		}
+		// per upstream-> RR
+		c.LbPolicy = cluster.Cluster_ROUND_ROBIN
+	case "RequestHash":
+		if len(lbpolicy.RequestHashPolicies) == 0 {
+			return errors.New("policy RequestHash chosen but no policies provided")
+		}
+		// per upstream -> RR
+		c.LbPolicy = cluster.Cluster_ROUND_ROBIN
+
 	// should figure out what to do when RequestHash is specified
 	// Moreover the HTTPProxy specs don't explicitly mention
 	// "RingHash" and "Maglev" as valid values for an HTTP request
@@ -369,6 +389,7 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 		Name:      crd.Name,
 		Namespace: crd.Namespace,
 		TypeURL:   IngressTypeURL,
+		Priority:  2,
 	}
 
 	if crd.Annotations == nil {
@@ -378,6 +399,9 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 		if ingress.Class == "" {
 			ingress.CRDError = "Missing or empty " + annotations.IC + " annotation"
 		}
+
+		ingress.ServiceId = crd.Annotations[annotations.ServiceId]
+
 		if hostsAnnot := crd.Annotations[annotations.Hosts]; hostsAnnot != "" {
 			// input validation: no empty values, no duplicates, no '*', no collision with fqdn
 			// TODO: move this to xlate eventually; need to decide on a messaging strategy, which
@@ -413,6 +437,13 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 				hostMap[h] = true
 			}
 			ingress.VirtualHost.Domains = inHosts
+		}
+
+		if priorityAnnot := crd.Annotations[annotations.Priority]; priorityAnnot != "" {
+			priority, err := strconv.ParseInt(priorityAnnot, 10, 0)
+			if err == nil {
+				ingress.Priority = int(priority)
+			}
 		}
 	}
 
@@ -560,6 +591,8 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 			cpol.AllowCredentials = wrapperspb.Bool(pol.AllowCredentials)
 			ingress.VirtualHost.Cors = cpol
 		}
+
+		ingress.VirtualHost.Logging = crd.Spec.VirtualHost.Logging
 	}
 
 	if crd.Spec.TCPProxy != nil {
@@ -682,9 +715,9 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 			var pf = xRoute.PerFilterConfig
 			// route AuthPolicy can either be Disabled OR provide a context but not both
 			if route.AuthPolicy.Disabled {
-				pf.Authz = &envoy_api.ExtAuthzPerRoute{
-					ExtAuthzPerRoute: authz_http.ExtAuthzPerRoute{
-						Override: &authz_http.ExtAuthzPerRoute_Disabled{
+				pf.Authz = &xlate.ExtAuthzPerRoute{
+					ExtAuthzPerRoute: ext_authz.ExtAuthzPerRoute{
+						Override: &ext_authz.ExtAuthzPerRoute_Disabled{
 							Disabled: true,
 						},
 					},
@@ -698,10 +731,10 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 						mp[k] = v
 					}
 				}
-				pf.Authz = &envoy_api.ExtAuthzPerRoute{
-					ExtAuthzPerRoute: authz_http.ExtAuthzPerRoute{
-						Override: &authz_http.ExtAuthzPerRoute_CheckSettings{
-							CheckSettings: &authz_http.CheckSettings{
+				pf.Authz = &xlate.ExtAuthzPerRoute{
+					ExtAuthzPerRoute: ext_authz.ExtAuthzPerRoute{
+						Override: &ext_authz.ExtAuthzPerRoute_CheckSettings{
+							CheckSettings: &ext_authz.CheckSettings{
 								ContextExtensions: mp,
 							},
 						},
@@ -741,6 +774,12 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 			}
 
 		}
+		xRoute.HashPolicies, err = handleStickyPolicy(&route)
+		if err != nil {
+			ingress.CRDError = err.Error()
+			return ingress
+		}
+
 		xRoute.Clusters = make([]xlate.Cluster, len(route.Services))
 		for i, service := range route.Services {
 			xRoute.Clusters[i], err = serviceToCluster(&service, &route)
@@ -788,6 +827,89 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 	ingress.LastCRDStatus = crd.Status.Description
 
 	return ingress
+}
+
+// handleStickyPolicy --
+func handleStickyPolicy(route *Route) ([]xlate.HashPolicy, error) {
+	if route.LoadBalancerPolicy != nil {
+		switch route.LoadBalancerPolicy.Strategy {
+		case "Cookie":
+			// per upstream v1.19 internal/dag/policy.go#642 , hard-wire the cookie.
+			forever := time.Duration(0)
+			hash := make([]xlate.HashPolicy, 1)
+			hash[0] = xlate.HashPolicy{
+				Cookie: &xlate.HashPolicyCookie{
+					Name: SessionCookie,
+					Ttl:  &forever,
+					Path: "/",
+				},
+				Terminal: true,
+			}
+			return hash, nil
+		case "RequestHash":
+			// upstream RequestHash allows for multiple headers but no access to ttl/path
+			hash := make([]xlate.HashPolicy, len(route.LoadBalancerPolicy.RequestHashPolicies))
+			mp := make(map[string]bool)
+			for ii, hp := range route.LoadBalancerPolicy.RequestHashPolicies {
+				if hp.HeaderHashOptions == nil {
+					return nil, fmt.Errorf("missing RequestHash.HeaderHashOptions in item %d", ii)
+				}
+				if len(hp.HeaderHashOptions.HeaderName) == 0 {
+					return nil, fmt.Errorf("missing RequestHash.HeaderHashOptions.HeaderName must be defined in item %d", ii)
+				}
+				_, ok := mp[hp.HeaderHashOptions.HeaderName]
+				if ok {
+					return nil, fmt.Errorf("duplicate header name %s RequestHash.HeaderHashOptions.HeaderName in item %d",
+						hp.HeaderHashOptions.HeaderName, ii)
+				}
+				tt := new(types.Duration)
+				// again, upstream provides no access to ttl/path
+				newPol := xlate.HashPolicy{
+					Cookie: &xlate.HashPolicyCookie{
+						Name: hp.HeaderHashOptions.HeaderName,
+						Ttl:  &tt.Duration,
+						Path: "/",
+					},
+					Terminal: hp.Terminal,
+				}
+				hash[ii] = newPol
+				mp[hp.HeaderHashOptions.HeaderName] = true
+			}
+			return hash, nil
+		}
+	}
+	// otherwise, make the hashes that may apply later
+	hash := make([]xlate.HashPolicy, len(route.HashPolicy))
+	for ii, hp := range route.HashPolicy {
+		if hp.Header != nil {
+			hash[ii] = xlate.HashPolicy{
+				Header: &xlate.HashPolicyHeader{
+					Name: hp.Header.HeaderName,
+				},
+			}
+		} else if hp.ConnectionProperties != nil {
+			hash[ii] = xlate.HashPolicy{
+				ConnectionProperties: &xlate.HashPolicyConnectionProperties{
+					SourceIp: hp.ConnectionProperties.SourceIp,
+				},
+			}
+		} else if hp.Cookie != nil {
+			var tt *types.Duration
+			tt = hp.Cookie.Ttl
+			if tt == nil {
+				tt = new(types.Duration)
+			}
+			hash[ii] = xlate.HashPolicy{
+				Cookie: &xlate.HashPolicyCookie{
+					Name: hp.Cookie.Name,
+					Ttl:  &tt.Duration,
+					Path: hp.Cookie.Path,
+				},
+				Terminal: hp.Terminal,
+			}
+		}
+	}
+	return hash, nil
 }
 
 func HTTPProxyStatusInterface() xlate.IngressStatus {
