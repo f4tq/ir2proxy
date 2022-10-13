@@ -50,6 +50,7 @@ items:
           unhealthyThresholdCount: 3
         name: hello
         port: 3000
+        strategy: RingHash
       timeoutPolicy:
         request: infinity
     - headerMatch:
@@ -74,6 +75,42 @@ items:
           unhealthyThresholdCount: 3
         name: hello
         port: 3001
+    - match: "/source_ip_policy"
+      permitInsecure: true
+      prefixRewrite: "/"
+      services:
+      - name: hello2
+        port: 3002
+      hashPolicy:
+      - connectionProperties:
+          sourceIp: true
+
+    - match: "/cookie_policy/"
+      permitInsecure: true
+      prefixRewrite: "/"
+      services:
+      - name: hello2
+        port: 3002
+        strategy: WeightedLeastRequest
+      hashPolicy:
+      - cookie:
+          name: affinity
+          path: /
+          ttl: 1m0s
+        terminal: true
+    - match: "/cookie_policy/with_least_request"
+      permitInsecure: true
+      prefixRewrite: "/"
+      services:
+      - name: hello2
+        port: 3002
+      hashPolicy:
+      - cookie:
+          name: affinity
+          path: /
+          ttl: 1m0s
+        terminal: true
+
     - match: "/http2/"
       permitInsecure: true
       prefixRewrite: "/"

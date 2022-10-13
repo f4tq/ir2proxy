@@ -2,7 +2,7 @@ module github.com/projectcontour/ir2proxy
 
 go 1.18
 
-replace kapcom.adobe.com v1.18.2 => git.corp.adobe.com/fortescu/kapcom v1.18.3-0.20220826192651-633eb5640a6c
+replace kapcom.adobe.com v1.18.2 => git.corp.adobe.com/fortescu/kapcom v1.20.2-0.20221018223304-faef9851e80d
 
 require (
 	github.com/ghodss/yaml v1.0.0
@@ -25,6 +25,7 @@ require (
 )
 
 require (
+	github.com/davecgh/go-spew v1.1.1
 	github.com/spf13/viper v1.12.0
 	github.com/tidwall/sjson v1.2.5
 	k8s.io/api v0.25.0
@@ -48,7 +49,6 @@ require (
 	github.com/cespare/xxhash/v2 v2.1.1 // indirect
 	github.com/cncf/udpa/go v0.0.0-20210930031921-04548b0d99d4 // indirect
 	github.com/cncf/xds/go v0.0.0-20211011173535-cb28da3451f1 // indirect
-	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.8.0 // indirect
 	github.com/envoyproxy/go-control-plane v0.10.2-0.20220325020618-49ff273808a1 // indirect
 	github.com/envoyproxy/protoc-gen-validate v0.1.0 // indirect

@@ -25,4 +25,8 @@ const (
 	// IngressRoute annotation (legacy service support)
 	Hosts        = "adobeplatform.adobe.io/hosts"
 	CreatedEpoch = "kapcom.adobe.io/created-epoch"
+	ServiceId    = "adobe.serviceid"
+
+	// for migration between CRDs
+	Priority = "kapcom.adobe.io/priority"
 )

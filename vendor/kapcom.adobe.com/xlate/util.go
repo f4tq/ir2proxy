@@ -61,6 +61,10 @@ func AltStatName(kService *k8s.Service, kServicePort *k8s.ServicePort) string {
 	}, "_")
 }
 
+func GRPCClusterName(grpc *GRPCLogger) string {
+	return "gRPC-ALS@" + grpc.Host + ":" + strconv.Itoa(int(grpc.Port))
+}
+
 // TLSProtocolVersion parses a tls version string into a its protobuf equivalent
 // it returns false if the input string doesn't match any known version
 func TLSProtocolVersion(version string) (bool, tls.TlsParameters_TlsProtocol) {

@@ -148,11 +148,9 @@ func mutateClusterByRole(log log15.Logger, mci mutateClusterInput) {
 		}
 
 		if xCluster.ConnectTimeout == 0 {
-			if externalName == "" {
-				c.ConnectTimeout = ptypes.DurationProto(30 * time.Millisecond)
-			} else {
-				c.ConnectTimeout = ptypes.DurationProto(250 * time.Millisecond)
-			}
+			// this value needs to support externalName (egressing the cluster)
+			// as well as mTLS where the handshake is included in this duration
+			c.ConnectTimeout = ptypes.DurationProto(250 * time.Millisecond)
 		} else {
 			c.ConnectTimeout = ptypes.DurationProto(xCluster.ConnectTimeout)
 		}
@@ -201,10 +199,11 @@ func mutateClusterByRole(log log15.Logger, mci mutateClusterInput) {
 				},
 			}
 
-			if mci.mtlsH2 {
-				utc.CommonTlsContext.AlpnProtocols = []string{"h2"}
-				c.Http2ProtocolOptions = &core.Http2ProtocolOptions{}
-			}
+			// TODO(bcook) figure out why this is causing 503s and consider removing
+			// if mci.mtlsH2 {
+			// 	utc.CommonTlsContext.AlpnProtocols = []string{"h2"}
+			// 	c.Http2ProtocolOptions = &core.Http2ProtocolOptions{}
+			// }
 		}
 
 		if utc != nil {
@@ -282,7 +281,7 @@ func mutateClusterByRole(log log15.Logger, mci mutateClusterInput) {
 
 	case SidecarRole:
 
-		c.ConnectTimeout = ptypes.DurationProto(10 * time.Millisecond)
+		c.ConnectTimeout = ptypes.DurationProto(100 * time.Millisecond)
 
 		c.ClusterDiscoveryType = &cluster.Cluster_Type{
 			Type: cluster.Cluster_STATIC,
@@ -394,7 +393,7 @@ func (recv *CRDHandler) createClusters(sotw SotW, ingress *Ingress,
 	return
 }
 
-func (recv *CRDHandler) initClusters(ingressClass string, sotw SotW, shouldUpdateCDS *bool) {
+func (recv *CRDHandler) handleMiscClusters(ingress *Ingress, sotw SotW, shouldUpdateCDS *bool) {
 	if recv.statsCluster != nil {
 		if _, exists := sotw.cds[constants.StatsCluster]; !exists {
 			sotw.cds[constants.StatsCluster] = recv.statsCluster
@@ -417,6 +416,7 @@ func (recv *CRDHandler) initClusters(ingressClass string, sotw SotW, shouldUpdat
 			}
 		}
 	}
+
 	if recv.authzCluster != nil {
 		if sotw.sidecar == nil {
 			// gw side authz cluster
@@ -431,11 +431,12 @@ func (recv *CRDHandler) initClusters(ingressClass string, sotw SotW, shouldUpdat
 			}
 		}
 	}
+
 	if sotw.sidecar != nil && sotw.sidecar.Spec.Filters.ExtAuthz != nil {
 		// TODO: @bcook: do we still have a need for sidecar defined authz?
 		//    it would be recursive if gw authz were on too
 		if _, exists := sotw.cds[constants.ExtAuthzCluster]; !exists {
-			cluster := &cluster.Cluster{
+			cr := &cluster.Cluster{
 				Name:                 constants.ExtAuthzCluster,
 				ConnectTimeout:       ptypes.DurationProto(10 * time.Millisecond),
 				Http2ProtocolOptions: &core.Http2ProtocolOptions{},
@@ -453,11 +454,37 @@ func (recv *CRDHandler) initClusters(ingressClass string, sotw SotW, shouldUpdat
 			}
 			// TODO(fortesque) reenable
 			// recv.mutateTransportSocket(cluster)
-			sotw.cds[constants.ExtAuthzCluster] = xds.NewWrapper(cluster)
+			sotw.cds[constants.ExtAuthzCluster] = xds.NewWrapper(cr)
 			*shouldUpdateCDS = true
 		}
 	}
 
+	if len(ingress.VirtualHost.Logging.Loggers) > 0 && config.GrpcAlsEnabled() {
+		if grpcLogger := ingress.VirtualHost.Logging.Loggers[0].GRPC; grpcLogger != nil {
+
+			clusterName := GRPCClusterName(grpcLogger)
+
+			if _, exists := sotw.cds[clusterName]; !exists {
+
+				cr := &cluster.Cluster{
+					Name:                 clusterName,
+					ConnectTimeout:       ptypes.DurationProto(10 * time.Millisecond),
+					Http2ProtocolOptions: &core.Http2ProtocolOptions{},
+					ClusterDiscoveryType: &cluster.Cluster_Type{
+						// ensure traffic is evenly distributed to gRPC ALSes
+						Type: cluster.Cluster_STRICT_DNS,
+					},
+					LoadAssignment: &endpoint.ClusterLoadAssignment{
+						ClusterName: clusterName,
+						Endpoints:   llbEndpoints(grpcLogger.Host, uint32(grpcLogger.Port)),
+					},
+				}
+
+				sotw.cds[clusterName] = xds.NewWrapper(cr)
+				*shouldUpdateCDS = true
+			}
+		}
+	}
 }
 
 func (recv *CRDHandler) updateCDS(ns, name string) {
@@ -473,7 +500,7 @@ func (recv *CRDHandler) updateCDS(ns, name string) {
 		for _, sotw := range recv.getSotWs(ingress) {
 			shouldUpdateCDS := false
 
-			recv.initClusters(ingress.Class, sotw, &shouldUpdateCDS)
+			recv.handleMiscClusters(ingress, sotw, &shouldUpdateCDS)
 
 			if ingress.IsClusterService() && sotw.sidecar == nil {
 				config.Log.Debug("updateCDS", "cluster_service", fmt.Sprintf("Skipping cluster_service ingress %s", ingress.Name))

@@ -1,10 +1,13 @@
 package xds
 
 import (
+	"kapcom.adobe.com/config"
 	"kapcom.adobe.com/util"
 
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	grpc_log "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
+	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcp_proxy "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"gopkg.in/inconshreveable/log15.v2"
@@ -58,21 +61,11 @@ func MapTCPProxyClusters(log log15.Logger, lr *listener.Listener, cb func(string
 
 	for _, fc := range lr.FilterChains {
 		for _, filter := range fc.Filters {
-			if filter.Name != wellknown.TCPProxy || filter.ConfigType == nil {
+			if filter.Name != wellknown.TCPProxy {
 				continue
 			}
 
-			ftc, ok := filter.ConfigType.(*listener.Filter_TypedConfig)
-			if !ok {
-				continue
-			}
-
-			msg := util.FromAny(log, ftc.TypedConfig)
-			if msg == nil {
-				continue
-			}
-
-			tcpProxy, ok := msg.(*tcp_proxy.TcpProxy)
+			tcpProxy, ok := util.FromAny(log, filter.GetTypedConfig()).(*tcp_proxy.TcpProxy)
 			if !ok {
 				continue
 			}
@@ -89,6 +82,51 @@ func MapTCPProxyClusters(log log15.Logger, lr *listener.Listener, cb func(string
 
 			case *tcp_proxy.TcpProxy_Cluster:
 				cb(cs.Cluster)
+			}
+		}
+	}
+}
+
+func MapGRPCALSClusters(log log15.Logger, lr *listener.Listener, cb func(string)) {
+	if lr == nil || cb == nil {
+		return
+	}
+
+	if config.DebugLogs() {
+		log = log.New("f", "MapGRPCALSClusters")
+	}
+
+	for _, fc := range lr.FilterChains {
+		for _, filter := range fc.Filters {
+			if filter.Name != wellknown.HTTPConnectionManager {
+				continue
+			}
+
+			hcmConfig, ok := util.FromAny(log, filter.GetTypedConfig()).(*hcm.HttpConnectionManager)
+			if !ok {
+				continue
+			}
+
+			for _, al := range hcmConfig.AccessLog {
+				if al.Name != wellknown.HTTPGRPCAccessLog {
+					continue
+				}
+
+				hgalc, ok := util.FromAny(log, al.GetTypedConfig()).(*grpc_log.HttpGrpcAccessLogConfig)
+				if !ok {
+					log.Debug("!msg.(*grpc_log.HttpGrpcAccessLogConfig)")
+					continue
+				}
+
+				clusterName := hgalc.
+					GetCommonConfig().
+					GetGrpcService().
+					GetEnvoyGrpc().
+					GetClusterName()
+
+				if clusterName != "" {
+					cb(clusterName)
+				}
 			}
 		}
 	}

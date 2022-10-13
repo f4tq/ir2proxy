@@ -17,13 +17,15 @@ import (
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	ext_authz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
+	header_to_metadata "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
 	matcher "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/golang/protobuf/ptypes/any"
-	_struct "github.com/golang/protobuf/ptypes/struct"
 	"github.com/golang/protobuf/ptypes/wrappers"
+	"google.golang.org/protobuf/types/known/structpb"
+	"gopkg.in/inconshreveable/log15.v2"
 	k8s "k8s.io/api/core/v1"
 )
 
@@ -172,23 +174,41 @@ func compareHeaderMatchers(hm1, hm2 []*route.HeaderMatcher) bool {
 	return len(hm1) > len(hm2)
 }
 
-func perFilterConfig(vhRoute *route.Route, xRoute *Route) {
+func perFilterConfig(log log15.Logger, vhRoute *route.Route, xRoute *Route) {
 	if xRoute.PerFilterConfig == nil {
 		return
 	}
 
-	pfc := make(map[string]*any.Any)
-	var inInterface map[string]interface{}
-	inrec, err := json.Marshal(xRoute.PerFilterConfig)
-	if err == nil {
-		json.Unmarshal(inrec, &inInterface)
-
-		for k, v := range inInterface {
-			s := new(_struct.Struct)
-			recurseIface(s, v)
-			pfc[k], _ = ptypes.MarshalAny(s)
+	if xRoute.PerFilterConfig.IpAllowDeny != nil {
+		if vhRoute.TypedPerFilterConfig == nil {
+			vhRoute.TypedPerFilterConfig = make(map[string]*any.Any)
 		}
-		vhRoute.TypedPerFilterConfig = pfc
+
+		bs, _ := json.Marshal(xRoute.PerFilterConfig.IpAllowDeny)
+		spb := new(structpb.Struct)
+		spb.UnmarshalJSON(bs)
+
+		vhRoute.TypedPerFilterConfig[constants.IpAllowDenyFilter] = util.ToAny(log, spb)
+	}
+
+	if xRoute.PerFilterConfig.HeaderSize != nil {
+		if vhRoute.TypedPerFilterConfig == nil {
+			vhRoute.TypedPerFilterConfig = make(map[string]*any.Any)
+		}
+
+		bs, _ := json.Marshal(xRoute.PerFilterConfig.HeaderSize)
+		spb := new(structpb.Struct)
+		spb.UnmarshalJSON(bs)
+
+		vhRoute.TypedPerFilterConfig[constants.HeaderSizeFilter] = util.ToAny(log, spb)
+	}
+
+	if authz := xRoute.PerFilterConfig.Authz; authz != nil {
+		if vhRoute.TypedPerFilterConfig == nil {
+			vhRoute.TypedPerFilterConfig = make(map[string]*any.Any)
+		}
+
+		vhRoute.TypedPerFilterConfig[wellknown.HTTPExternalAuthorization] = util.ToAny(log, &authz.ExtAuthzPerRoute)
 	}
 }
 
@@ -457,7 +477,8 @@ func (recv *CRDHandler) routeToVHostRoute(role EnvoyRole, ingress *Ingress,
 		for _, hp := range xRoute.HashPolicies {
 			var rahp *route.RouteAction_HashPolicy
 
-			if hp.Header != nil {
+			switch {
+			case hp.Header != nil:
 				rahp = &route.RouteAction_HashPolicy{
 					PolicySpecifier: &route.RouteAction_HashPolicy_Header_{
 						Header: &route.RouteAction_HashPolicy_Header{
@@ -465,7 +486,7 @@ func (recv *CRDHandler) routeToVHostRoute(role EnvoyRole, ingress *Ingress,
 						},
 					},
 				}
-			} else if hp.Cookie != nil {
+			case hp.Cookie != nil:
 				hpc := &route.RouteAction_HashPolicy_Cookie{}
 				if hp.Cookie.Name != "" {
 					hpc.Name = hp.Cookie.Name
@@ -484,7 +505,16 @@ func (recv *CRDHandler) routeToVHostRoute(role EnvoyRole, ingress *Ingress,
 						Cookie: hpc,
 					},
 				}
-			} else if hp.ConnectionProperties != nil {
+			case hp.QueryParameter != nil:
+				hpc := &route.RouteAction_HashPolicy_QueryParameter{
+					Name: hp.QueryParameter.ParameterName,
+				}
+				rahp = &route.RouteAction_HashPolicy{
+					PolicySpecifier: &route.RouteAction_HashPolicy_QueryParameter_{
+						QueryParameter: hpc,
+					},
+				}
+			case hp.ConnectionProperties != nil:
 				rahp = &route.RouteAction_HashPolicy{
 					PolicySpecifier: &route.RouteAction_HashPolicy_ConnectionProperties_{
 						ConnectionProperties: &route.RouteAction_HashPolicy_ConnectionProperties{
@@ -580,7 +610,7 @@ func (recv *CRDHandler) routeToVHostRoute(role EnvoyRole, ingress *Ingress,
 		// IP allow/deny would break in the Sidecar
 		//
 		// Max header size has already been enforced
-		perFilterConfig(vhRoute, xRoute)
+		perFilterConfig(recv.log, vhRoute, xRoute)
 	}
 
 	headerMatchers(vhRoute, xRoute)
@@ -646,45 +676,99 @@ func (recv *CRDHandler) ingressToVHost(sotw SotW, ingress *Ingress, ssl bool, cl
 	vh := &route.VirtualHost{
 		Name: ingress.Fqdn,
 	}
+
 	if len(ingress.VirtualHost.RateLimits) > 0 {
-		xx := make([]*route.RateLimit, len(ingress.VirtualHost.RateLimits))
-		for idx, rr := range ingress.VirtualHost.RateLimits {
+		rateLimits := make([]*route.RateLimit, len(ingress.VirtualHost.RateLimits))
+		for i, rr := range ingress.VirtualHost.RateLimits {
 			cp := rr.DeepCopy()
-			xx[idx] = cp.RateLimit
+			rateLimits[i] = cp.RateLimit
 		}
-		vh.RateLimits = xx
+		vh.RateLimits = rateLimits
 	}
+
 	if ingress.VirtualHost.Authorization != nil {
-		vv := ext_authz.ExtAuthzPerRoute{}
-		// precisely one of Disabled or Context settings
+		if vh.TypedPerFilterConfig == nil {
+			vh.TypedPerFilterConfig = make(map[string]*any.Any)
+		}
+
+		eapr := ext_authz.ExtAuthzPerRoute{}
+		// precisely one of Disabled or CheckSettings
 		switch {
 		case ingress.VirtualHost.Authorization.AuthPolicy.Disabled:
-			vv.Override = &ext_authz.ExtAuthzPerRoute_Disabled{
+			eapr.Override = &ext_authz.ExtAuthzPerRoute_Disabled{
 				Disabled: ingress.VirtualHost.Authorization.AuthPolicy.Disabled,
 			}
+
 		case len(ingress.VirtualHost.Authorization.AuthPolicy.Context) > 0:
 			mp := make(map[string]string)
 			for k, v := range ingress.VirtualHost.Authorization.AuthPolicy.Context {
 				mp[k] = v
 			}
-			vv.Override = &ext_authz.ExtAuthzPerRoute_CheckSettings{
+			eapr.Override = &ext_authz.ExtAuthzPerRoute_CheckSettings{
 				CheckSettings: &ext_authz.CheckSettings{
 					ContextExtensions: mp,
 				},
 			}
 		}
-		aaa := util.ToAny(recv.log, &vv)
-		if vh.TypedPerFilterConfig == nil {
-			vh.TypedPerFilterConfig = map[string]*any.Any{
-				wellknown.HTTPExternalAuthorization: aaa,
-				//util.ToAny(recv.log, &vv),
-			}
-		} else {
-			vh.TypedPerFilterConfig[wellknown.ExternalAuthorization] = aaa
-		}
+
+		vh.TypedPerFilterConfig[wellknown.HTTPExternalAuthorization] = util.ToAny(recv.log, &eapr)
 	}
+
+	if ingress.ServiceId != "" {
+		if vh.TypedPerFilterConfig == nil {
+			vh.TypedPerFilterConfig = make(map[string]*any.Any)
+		}
+
+		conf := header_to_metadata.Config{
+			RequestRules: []*header_to_metadata.Config_Rule{
+				{
+					Header: constants.ServiceIdHeader,
+					OnHeaderMissing: &header_to_metadata.Config_KeyValuePair{
+						Key:   constants.ServiceIdHeader,
+						Value: ingress.ServiceId,
+					},
+				},
+				{
+					Header: constants.ServiceIdHeader,
+					OnHeaderMissing: &header_to_metadata.Config_KeyValuePair{
+						Key:               constants.ServiceIdHeader,
+						Value:             ingress.ServiceId,
+						MetadataNamespace: wellknown.HTTPExternalAuthorization,
+					},
+				},
+				{
+					Header: constants.ServiceIdHeader,
+					OnHeaderMissing: &header_to_metadata.Config_KeyValuePair{
+						Key:               constants.ServiceIdHeader,
+						Value:             ingress.ServiceId,
+						MetadataNamespace: wellknown.HTTPGRPCAccessLog,
+					},
+				},
+			},
+		}
+
+		vh.TypedPerFilterConfig[constants.HeaderToMetadataFilter] = util.ToAny(recv.log, &conf)
+	}
+
 	if ingress.VirtualHost.Cors != nil {
 		vh.Cors = &ingress.VirtualHost.Cors.CorsPolicy
+	}
+
+	if ingress.VirtualHost.ResponseHeadersToAdd != nil {
+		sort.Stable(KVPByKey(ingress.VirtualHost.ResponseHeadersToAdd))
+		hvos := make([]*core.HeaderValueOption, len(ingress.VirtualHost.ResponseHeadersToAdd))
+		for i, kvp := range ingress.VirtualHost.ResponseHeadersToAdd {
+			hvos[i] = &core.HeaderValueOption{
+				Header: &core.HeaderValue{
+					Key:   kvp.Key,
+					Value: kvp.Value,
+				},
+				Append: &wrappers.BoolValue{
+					Value: false,
+				},
+			}
+		}
+		vh.ResponseHeadersToAdd = hvos
 	}
 
 	for _, xRoute := range ingress.VirtualHost.ResolvedRoutes() {
@@ -703,7 +787,6 @@ func (recv *CRDHandler) ingressToVHost(sotw SotW, ingress *Ingress, ssl bool, cl
 			ingress.Fqdn + ":*",
 		}
 		vh.Domains = append(vh.Domains, ingress.VirtualHost.Domains...)
-
 		vh.RetryPolicy = &route.RetryPolicy{
 			RetryOn:                       "connect-failure,reset",
 			NumRetries:                    &wrappers.UInt32Value{Value: 3},
@@ -810,8 +893,8 @@ func (recv *CRDHandler) updateGatewayRDS(sotw SotW, ingresses []*Ingress) {
 			} else {
 				wrapper = xds.NewWrapper(
 					&route.RouteConfiguration{
-						Name:         routeName,
-						VirtualHosts: []*route.VirtualHost{},
+						Name:                routeName,
+						InternalOnlyHeaders: []string{constants.ServiceIdHeader},
 					}, &xds.RouteConfigurationMeta{
 						Clusters: set.New(),
 					},
@@ -941,6 +1024,16 @@ func (recv *CRDHandler) updateSidecarRDS(sotw SotW, ingress *Ingress) {
 					shouldUpdateRDS = true
 				}
 
+				if shouldUpdateRDS {
+					wrapper.Write(func(msg proto.Message, meta *interface{}) (protoChanged bool) {
+						rc := msg.(*route.RouteConfiguration)
+						rcMeta := (*meta).(*xds.RouteConfigurationMeta)
+
+						updateClusterMeta(rc, rcMeta)
+						return
+					})
+				}
+
 				uniqueRouteConfigs[routeConfigName] = wrapper
 			}
 		}
@@ -1000,79 +1093,4 @@ func (recv *CRDHandler) updateRDS(iface, ifaceOld interface{}) {
 			}
 		}
 	}
-}
-
-// recurseIface is a *_struct.Value producing function that recurses into nested
-// structures
-func recurseIface(s *_struct.Struct, iface interface{}) (ret *_struct.Value) {
-	switch ifaceVal := iface.(type) {
-	case int:
-		ret = &_struct.Value{
-			Kind: &_struct.Value_NumberValue{float64(ifaceVal)},
-		}
-	case int32:
-		ret = &_struct.Value{
-			Kind: &_struct.Value_NumberValue{float64(ifaceVal)},
-		}
-	case int64:
-		ret = &_struct.Value{
-			Kind: &_struct.Value_NumberValue{float64(ifaceVal)},
-		}
-	case uint:
-		ret = &_struct.Value{
-			Kind: &_struct.Value_NumberValue{float64(ifaceVal)},
-		}
-	case uint32:
-		ret = &_struct.Value{
-			Kind: &_struct.Value_NumberValue{float64(ifaceVal)},
-		}
-	case uint64:
-		ret = &_struct.Value{
-			Kind: &_struct.Value_NumberValue{float64(ifaceVal)},
-		}
-	case float32:
-		ret = &_struct.Value{
-			Kind: &_struct.Value_NumberValue{float64(ifaceVal)},
-		}
-	case float64:
-		ret = &_struct.Value{
-			Kind: &_struct.Value_NumberValue{ifaceVal},
-		}
-	case string:
-		ret = &_struct.Value{
-			Kind: &_struct.Value_StringValue{ifaceVal},
-		}
-	case bool:
-		ret = &_struct.Value{
-			Kind: &_struct.Value_BoolValue{ifaceVal},
-		}
-	case map[string]interface{}:
-		if s == nil { // will only be false on the initial call
-			s = new(_struct.Struct)
-		}
-		if s.Fields == nil {
-			s.Fields = make(map[string]*_struct.Value)
-		}
-
-		for k, v := range ifaceVal {
-			s.Fields[k] = recurseIface(nil, v)
-		}
-
-		ret = &_struct.Value{
-			Kind: &_struct.Value_StructValue{s},
-		}
-	case []interface{}:
-		lv := new(_struct.ListValue)
-		for _, v := range ifaceVal {
-			lv.Values = append(lv.Values, recurseIface(nil, v))
-		}
-		ret = &_struct.Value{
-			Kind: &_struct.Value_ListValue{lv},
-		}
-	default:
-		ret = &_struct.Value{
-			Kind: &_struct.Value_NullValue{},
-		}
-	}
-	return
 }

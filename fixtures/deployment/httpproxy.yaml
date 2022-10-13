@@ -1,0 +1,149 @@
+# Generated from ingressroute f4tq/hello
+---
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  annotations:
+    kapcom.adobe.io/priority: "2"
+    kubernetes.io/ingress.class: contour-public
+  name: hello
+  namespace: f4tq
+spec:
+  routes:
+  - adobe:cookieLbConfig:
+      name: affinity
+      path: /
+      strategy: RingHash
+      ttl: 1m0s
+    adobe:perFilterConfig:
+      envoy.filters.http.header_size:
+        header_size:
+          max_bytes: 8192
+      envoy.filters.http.ip_allow_deny:
+        allow_cidrs:
+        - address_prefix: 192.150.10.192
+          prefix_len: 27
+    conditions:
+    - prefix: /
+    healthCheckPolicy:
+      healthyThresholdCount: 4
+      intervalSeconds: 5
+      path: /health
+      timeoutSeconds: 2
+      unhealthyThresholdCount: 3
+    loadBalancerPolicy:
+      strategy: Cookie
+    requestHeadersPolicy:
+      set:
+      - name: x-forwarded-tls-version
+        value: __percent__DOWNSTREAM_TLS_VERSION__percent__
+      - name: x-forwarded-tls-cipher
+        value: __percent__DOWNSTREAM_TLS_CIPHER__percent__
+    responseHeadersPolicy:
+      set:
+      - name: x-envoy-upstream-remote-address
+        value: __percent__UPSTREAM_REMOTE_ADDRESS__percent__
+    services:
+    - name: hello
+      port: 3000
+    timeoutPolicy:
+      idle: 5m0s
+      response: infinity
+  - conditions:
+    - prefix: /
+    - header:
+        contains: foo=bar
+        name: :path
+    pathRewritePolicy:
+      replacePrefix:
+      - replacement: /ping
+    services:
+    - name: hello
+      port: 3000
+  - conditions:
+    - prefix: /node/
+    - header:
+        exact: GET
+        name: :method
+    healthCheckPolicy:
+      healthyThresholdCount: 4
+      intervalSeconds: 5
+      path: /health
+      timeoutSeconds: 2
+      unhealthyThresholdCount: 3
+    pathRewritePolicy:
+      replacePrefix:
+      - replacement: /
+    services:
+    - name: hello
+      port: 3001
+  - conditions:
+    - prefix: /source_ip_policy
+    loadBalancerPolicy:
+      requestHashPolicies:
+      - hashSourceIP: true
+      strategy: RoundRobin
+    pathRewritePolicy:
+      replacePrefix:
+      - replacement: /
+    permitInsecure: true
+    services:
+    - name: hello2
+      port: 3002
+  - adobe:cookieLbConfig:
+      name: affinity
+      path: /
+      strategy: WeightedLeastRequest
+      ttl: 1m0s
+    conditions:
+    - prefix: /cookie_policy/
+    loadBalancerPolicy:
+      strategy: Cookie
+    pathRewritePolicy:
+      replacePrefix:
+      - replacement: /
+    permitInsecure: true
+    services:
+    - name: hello2
+      port: 3002
+  - adobe:cookieLbConfig:
+      name: affinity
+      path: /
+      ttl: 1m0s
+    conditions:
+    - prefix: /cookie_policy/with_least_request
+    loadBalancerPolicy:
+      strategy: Cookie
+    pathRewritePolicy:
+      replacePrefix:
+      - replacement: /
+    permitInsecure: true
+    services:
+    - name: hello2
+      port: 3002
+  - conditions:
+    - prefix: /http2/
+    pathRewritePolicy:
+      replacePrefix:
+      - replacement: /
+    permitInsecure: true
+    services:
+    - name: hello2
+      port: 3002
+  - conditions:
+    - prefix: /http2/tls/
+    pathRewritePolicy:
+      replacePrefix:
+      - replacement: /
+    services:
+    - name: hello2
+      port: 3003
+  virtualhost:
+    fqdn: f4tq.sandbox.cloud.adobe.io
+    tls:
+      adobe:cipherSuites:
+      - TLS_RSA_WITH_AES_256_GCM_SHA384|TLS_RSA_WITH_AES_256_CBC_SHA
+      - TLS_RSA_WITH_AES_128_GCM_SHA256
+      adobe:maximumProtocolVersion: "1.2"
+      secretName: cluster-ssl-x-sandbox-cloud-adobe-io
+

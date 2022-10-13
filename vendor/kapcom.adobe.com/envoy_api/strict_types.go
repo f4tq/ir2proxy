@@ -33,9 +33,8 @@ type (
 		APIType      string         `json:"api_type,omitempty"`
 		GrpcServices []GrpcServices `json:"grpc_services,omitempty" kapcom:"forcecompare"`
 	}
-	ADSConfigSource struct {
-	}
-	ConfigSource struct {
+	ADSConfigSource struct{}
+	ConfigSource    struct {
 		APIConfigSource     APIConfigSource `json:"api_config_source,omitempty"`
 		ADSConfigSource     ADSConfigSource `json:"ads,omitempty"`
 		InitialFetchTimeout string          `json:"initial_fetch_timeout,omitempty"`
@@ -135,27 +134,30 @@ type (
 	}
 	JSONFormat struct {
 		Authority               string `json:"authority,omitempty"`
-		Method                  string `json:"method,omitempty"`
-		UserAgent               string `json:"user_agent,omitempty"`
-		Timestamp               string `json:"@timestamp,omitempty"`
+		BytesReceived           string `json:"bytes_received,omitempty"`
+		BytesSent               string `json:"bytes_sent,omitempty"`
 		DownstreamLocalAddress  string `json:"downstream_local_address,omitempty"`
+		DownstreamRemoteAddress string `json:"downstream_remote_address,omitempty"`
 		Duration                string `json:"duration,omitempty"`
-		RequestID               string `json:"request_id,omitempty"`
+		Method                  string `json:"method,omitempty"`
+		Path                    string `json:"path,omitempty"`
+		Protocol                string `json:"protocol,omitempty"`
+		RequestDuration         string `json:"request_duration,omitempty"`
 		RequestedServerName     string `json:"requested_server_name,omitempty"`
+		RequestID               string `json:"request_id,omitempty"`
 		ResponseCode            string `json:"response_code,omitempty"`
 		ResponseCodeDetails     string `json:"response_code_details,omitempty"`
+		ResponseDuration        string `json:"response_duration,omitempty"`
+		ResponseFlags           string `json:"response_flags,omitempty"`
+		ResponseTxDuration      string `json:"response_tx_duration,omitempty"`
+		Timestamp               string `json:"@timestamp,omitempty"`
+		UberTraceID             string `json:"uber_trace_id,omitempty"`
+		UpstreamCluster         string `json:"upstream_cluster,omitempty"`
 		UpstreamHost            string `json:"upstream_host,omitempty"`
 		UpstreamLocalAddress    string `json:"upstream_local_address,omitempty"`
 		UpstreamServiceTime     string `json:"upstream_service_time,omitempty"`
-		BytesReceived           string `json:"bytes_received,omitempty"`
-		BytesSent               string `json:"bytes_sent,omitempty"`
-		DownstreamRemoteAddress string `json:"downstream_remote_address,omitempty"`
-		Protocol                string `json:"protocol,omitempty"`
-		ResponseFlags           string `json:"response_flags,omitempty"`
+		UserAgent               string `json:"user_agent,omitempty"`
 		XForwardedFor           string `json:"x_forwarded_for,omitempty"`
-		Path                    string `json:"path,omitempty"`
-		UberTraceID             string `json:"uber_trace_id,omitempty"`
-		UpstreamCluster         string `json:"upstream_cluster,omitempty"`
 	}
 	AccessLogTypedConfig struct {
 		Type       string     `json:"@type,omitempty"`

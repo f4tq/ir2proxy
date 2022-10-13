@@ -346,8 +346,9 @@ func (recv *envoyConnection) checkCDSWarmed(typeUrl TypeURL, acks set.Set) {
 }
 
 // for new clusters we must wait to send RDS until they've been warmed
-func (recv *envoyConnection) adjustRDS(typeUrl TypeURL, resources set.Set) {
-	if typeUrl != RouteType {
+func (recv *envoyConnection) delayRDS(typeUrl TypeURL, resources set.Set) {
+	// don't delay RDS if this is the first DeltaDiscoveryResponse
+	if typeUrl != RouteType || recv.xdsNonce(typeUrl, false) == 1 {
 		return
 	}
 
@@ -388,20 +389,6 @@ func (recv *envoyConnection) adjustRDS(typeUrl TypeURL, resources set.Set) {
 		recv.log.Info("delaying RDS", "name", name)
 		delete(resources, name)
 	}
-}
-
-// CDS must always have EDS sent with it so we simulate an update even though
-// nothing is different about the EDS entry (i.e. the version didn't change)
-func (recv *envoyConnection) adjustEDS(typeUrl TypeURL, resources set.Set) {
-	if typeUrl != ClusterType || len(resources) == 0 {
-		return
-	}
-
-	for name := range resources {
-		delete(recv.eds.sotwVersions, name)
-	}
-
-	recv.thisChan <- internalDDRMsg{EndpointType}
 }
 
 func (recv *envoyConnection) handleDDR(req *discovery.DeltaDiscoveryRequest) {
@@ -519,6 +506,7 @@ func (recv *envoyConnection) handleDDR(req *discovery.DeltaDiscoveryRequest) {
 			if req.ErrorDetail == nil {
 				*envoyACKed = set.Union(*envoyACKed, nonceResources)
 
+				// special case for RDS to send previously delayed RDS
 				recv.checkCDSWarmed(TypeURL(req.TypeUrl), nonceResources)
 
 				for name := range nonceResources {
@@ -645,20 +633,42 @@ func (recv *envoyConnection) handleDDR(req *discovery.DeltaDiscoveryRequest) {
 	}
 
 	// But not if Envoy already knows about these resources and the versions match.
-	// These are also considered previously ACKed
+	// These are also considered previously ACKed (except in the case of EDS)
+	// initialResourceVersionsLoop:
 	for name, version := range req.InitialResourceVersions {
 		if version == "" {
 			log.Warn("missing version in InitialResourceVersions", "name", name)
 		}
 
 		if wrapper := addedSet[name]; wrapper != nil {
-			if wrapper.(Wrapper).Version(log) == version {
+			/*if wrapper.(Wrapper).Version(log) == version {
+
+				// Send EDS to Envoys with existing EDS of the same version
+				// because CDS may have changed but won't associate existing EDS
+				// with it
+				//
+				// We can look at the addNonces because CDS won't ACK until it's
+				// warmed
+				//
+				// references:
+				// https://github.com/envoyproxy/envoy/issues/22418
+				// https://github.com/envoyproxy/envoy/issues/13009
+				// https://git.corp.adobe.com/adobe-platform/kapcom/issues/287
+				// ./cds_warming.md
+				if TypeURL(req.TypeUrl) == EndpointType {
+					for _, addNonce := range recv.cds.envoyAddNonces {
+						if _, exists := addNonce[name]; exists {
+							continue initialResourceVersionsLoop
+						}
+					}
+				}
+
 				delete(addedSet, name)
 
 				(*envoyACKed)[name] = wrapper
 				sotwVersions[name] = version
 				log.Debug("removing initial resource version", "name", name)
-			}
+			}*/
 		} else {
 			// If this is a resource name that doesn't exist in the current SotW
 			// it still needs to be added as a previously ACKed resource so it
@@ -703,10 +713,7 @@ func (recv *envoyConnection) handleDDR(req *discovery.DeltaDiscoveryRequest) {
 	}
 
 	// special case for CDS warming to remove RDS entries if needed
-	recv.adjustRDS(TypeURL(req.TypeUrl), addedSet)
-
-	// special case for CDS warming to always send EDS
-	recv.adjustEDS(TypeURL(req.TypeUrl), addedSet)
+	recv.delayRDS(TypeURL(req.TypeUrl), addedSet)
 
 	res := &discovery.DeltaDiscoveryResponse{
 		TypeUrl: req.TypeUrl,

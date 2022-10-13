@@ -15,6 +15,9 @@ const (
 	Priority = "priority"
 	AnnotationPriorityKey = "kapcom.adobe.io/priority"
 	Force="force"
+	IdleTimeoutDefaultFlag = "idle-timeout-default"
+	ResponseTimeoutDefaultFlag = "response-timeout-default"
+
 )
 
 var (

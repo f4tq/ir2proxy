@@ -17,6 +17,7 @@ import (
 	resource "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
@@ -132,6 +133,7 @@ func (recv *adsServerImpl) newEnvoyConnection() *envoyConnection {
 		streamId: streamId,
 		// nodeId not known until the first DiscoveryRequest
 		// nodeCluster not known until the first DiscoveryRequest
+		// detailedMetrics set elsewhere
 		// delta set elsewhere
 		// deltaChan set elsewhere
 		serverChanSend: recv.serverChanSend,
@@ -382,6 +384,12 @@ func Serve(ctx context.Context, log log15.Logger, xdsInitChan chan<- struct{}, e
 	// connections
 	<-syncChan
 
+	grpclogger := &log15GrpcLogger{
+		logger:    log,
+		verbosity: 99, // https://github.com/grpc/grpc-go#how-to-turn-on-logging
+	}
+	grpclog.SetLoggerV2(grpclogger)
+
 	if config.GrpcTracing() {
 		grpc.EnableTracing = true
 	}
@@ -389,6 +397,9 @@ func Serve(ctx context.Context, log log15.Logger, xdsInitChan chan<- struct{}, e
 	grpcServer := grpc.NewServer([]grpc.ServerOption{
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time: 10 * time.Minute, // server to client ping
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime: 30 * time.Second, // commensurate with clusters['kapcom'].http2_protocol_options.connection_keepalive.interval on the envoy side
 		}),
 	}...)
 
