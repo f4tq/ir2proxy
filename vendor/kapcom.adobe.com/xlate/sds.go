@@ -33,6 +33,10 @@ func (recv *CRDHandler) removeUnreferencedSecretByName(deletedSecretName string)
 
 	var referenced bool
 	recv.mapIngresses(func(ingress *Ingress) (stop bool) {
+		if !recv.isHighestPriorityIngress(ingress) {
+			return
+		}
+
 		if ingress.Listener.TLS == nil || ingress.Listener.TLS.SecretName == "" {
 			return
 		}
@@ -139,6 +143,10 @@ func (recv *CRDHandler) updateSDS(iface, ifaceOld interface{}) {
 	// we have a kSecret and need to find out if any Ingress references it
 	if !referenced {
 		recv.mapIngresses(func(ingress *Ingress) (stop bool) {
+			if !recv.isHighestPriorityIngress(ingress) {
+				return
+			}
+
 			lstnr := ingress.Listener
 			if lstnr.TLS == nil || lstnr.TLS.SecretName == "" {
 				return

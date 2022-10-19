@@ -1003,7 +1003,7 @@ func (recv *JSONFormat) UnmarshalJSON(bs []byte) error {
 		return err
 	}
 	definedFields := map[string]interface {
-	}{"authority": nil, "method": nil, "user_agent": nil, "@timestamp": nil, "downstream_local_address": nil, "duration": nil, "request_id": nil, "requested_server_name": nil, "response_code": nil, "response_code_details": nil, "upstream_host": nil, "upstream_local_address": nil, "upstream_service_time": nil, "bytes_received": nil, "bytes_sent": nil, "downstream_remote_address": nil, "protocol": nil, "response_flags": nil, "x_forwarded_for": nil, "path": nil, "uber_trace_id": nil, "upstream_cluster": nil}
+	}{"authority": nil, "bytes_received": nil, "bytes_sent": nil, "downstream_local_address": nil, "downstream_remote_address": nil, "duration": nil, "method": nil, "path": nil, "protocol": nil, "request_duration": nil, "requested_server_name": nil, "request_id": nil, "response_code": nil, "response_code_details": nil, "response_duration": nil, "response_flags": nil, "response_tx_duration": nil, "@timestamp": nil, "uber_trace_id": nil, "upstream_cluster": nil, "upstream_host": nil, "upstream_local_address": nil, "upstream_service_time": nil, "user_agent": nil, "x_forwarded_for": nil}
 	for key := range allFields {
 		if _, exists := definedFields[key]; !exists {
 			return errors.New(".JSONFormat JSON contains unknown key: " + key)
@@ -1011,85 +1011,121 @@ func (recv *JSONFormat) UnmarshalJSON(bs []byte) error {
 	}
 	anon := struct {
 		Authority               string `json:"authority,omitempty"`
-		Method                  string `json:"method,omitempty"`
-		UserAgent               string `json:"user_agent,omitempty"`
-		Timestamp               string `json:"@timestamp,omitempty"`
+		BytesReceived           string `json:"bytes_received,omitempty"`
+		BytesSent               string `json:"bytes_sent,omitempty"`
 		DownstreamLocalAddress  string `json:"downstream_local_address,omitempty"`
+		DownstreamRemoteAddress string `json:"downstream_remote_address,omitempty"`
 		Duration                string `json:"duration,omitempty"`
-		RequestID               string `json:"request_id,omitempty"`
+		Method                  string `json:"method,omitempty"`
+		Path                    string `json:"path,omitempty"`
+		Protocol                string `json:"protocol,omitempty"`
+		RequestDuration         string `json:"request_duration,omitempty"`
 		RequestedServerName     string `json:"requested_server_name,omitempty"`
+		RequestID               string `json:"request_id,omitempty"`
 		ResponseCode            string `json:"response_code,omitempty"`
 		ResponseCodeDetails     string `json:"response_code_details,omitempty"`
+		ResponseDuration        string `json:"response_duration,omitempty"`
+		ResponseFlags           string `json:"response_flags,omitempty"`
+		ResponseTxDuration      string `json:"response_tx_duration,omitempty"`
+		Timestamp               string `json:"@timestamp,omitempty"`
+		UberTraceID             string `json:"uber_trace_id,omitempty"`
+		UpstreamCluster         string `json:"upstream_cluster,omitempty"`
 		UpstreamHost            string `json:"upstream_host,omitempty"`
 		UpstreamLocalAddress    string `json:"upstream_local_address,omitempty"`
 		UpstreamServiceTime     string `json:"upstream_service_time,omitempty"`
-		BytesReceived           string `json:"bytes_received,omitempty"`
-		BytesSent               string `json:"bytes_sent,omitempty"`
-		DownstreamRemoteAddress string `json:"downstream_remote_address,omitempty"`
-		Protocol                string `json:"protocol,omitempty"`
-		ResponseFlags           string `json:"response_flags,omitempty"`
+		UserAgent               string `json:"user_agent,omitempty"`
 		XForwardedFor           string `json:"x_forwarded_for,omitempty"`
-		Path                    string `json:"path,omitempty"`
-		UberTraceID             string `json:"uber_trace_id,omitempty"`
-		UpstreamCluster         string `json:"upstream_cluster,omitempty"`
 	}{}
 	if err := json.Unmarshal(bs, &anon); err != nil {
 		return errors.New(".JSONFormat" + err.Error())
 	}
 	recv.Authority = anon.Authority
-	recv.Method = anon.Method
-	recv.UserAgent = anon.UserAgent
-	recv.Timestamp = anon.Timestamp
+	recv.BytesReceived = anon.BytesReceived
+	recv.BytesSent = anon.BytesSent
 	recv.DownstreamLocalAddress = anon.DownstreamLocalAddress
+	recv.DownstreamRemoteAddress = anon.DownstreamRemoteAddress
 	recv.Duration = anon.Duration
-	recv.RequestID = anon.RequestID
+	recv.Method = anon.Method
+	recv.Path = anon.Path
+	recv.Protocol = anon.Protocol
+	recv.RequestDuration = anon.RequestDuration
 	recv.RequestedServerName = anon.RequestedServerName
+	recv.RequestID = anon.RequestID
 	recv.ResponseCode = anon.ResponseCode
 	recv.ResponseCodeDetails = anon.ResponseCodeDetails
+	recv.ResponseDuration = anon.ResponseDuration
+	recv.ResponseFlags = anon.ResponseFlags
+	recv.ResponseTxDuration = anon.ResponseTxDuration
+	recv.Timestamp = anon.Timestamp
+	recv.UberTraceID = anon.UberTraceID
+	recv.UpstreamCluster = anon.UpstreamCluster
 	recv.UpstreamHost = anon.UpstreamHost
 	recv.UpstreamLocalAddress = anon.UpstreamLocalAddress
 	recv.UpstreamServiceTime = anon.UpstreamServiceTime
-	recv.BytesReceived = anon.BytesReceived
-	recv.BytesSent = anon.BytesSent
-	recv.DownstreamRemoteAddress = anon.DownstreamRemoteAddress
-	recv.Protocol = anon.Protocol
-	recv.ResponseFlags = anon.ResponseFlags
+	recv.UserAgent = anon.UserAgent
 	recv.XForwardedFor = anon.XForwardedFor
-	recv.Path = anon.Path
-	recv.UberTraceID = anon.UberTraceID
-	recv.UpstreamCluster = anon.UpstreamCluster
 	return nil
 }
 func (a JSONFormat) Compare(b JSONFormat) error {
 	if a.Authority != b.Authority {
 		return fmt.Errorf(".JSONFormat.Authority: %v != %v", a.Authority, b.Authority)
 	}
-	if a.Method != b.Method {
-		return fmt.Errorf(".JSONFormat.Method: %v != %v", a.Method, b.Method)
+	if a.BytesReceived != b.BytesReceived {
+		return fmt.Errorf(".JSONFormat.BytesReceived: %v != %v", a.BytesReceived, b.BytesReceived)
 	}
-	if a.UserAgent != b.UserAgent {
-		return fmt.Errorf(".JSONFormat.UserAgent: %v != %v", a.UserAgent, b.UserAgent)
-	}
-	if a.Timestamp != b.Timestamp {
-		return fmt.Errorf(".JSONFormat.Timestamp: %v != %v", a.Timestamp, b.Timestamp)
+	if a.BytesSent != b.BytesSent {
+		return fmt.Errorf(".JSONFormat.BytesSent: %v != %v", a.BytesSent, b.BytesSent)
 	}
 	if a.DownstreamLocalAddress != b.DownstreamLocalAddress {
 		return fmt.Errorf(".JSONFormat.DownstreamLocalAddress: %v != %v", a.DownstreamLocalAddress, b.DownstreamLocalAddress)
 	}
+	if a.DownstreamRemoteAddress != b.DownstreamRemoteAddress {
+		return fmt.Errorf(".JSONFormat.DownstreamRemoteAddress: %v != %v", a.DownstreamRemoteAddress, b.DownstreamRemoteAddress)
+	}
 	if a.Duration != b.Duration {
 		return fmt.Errorf(".JSONFormat.Duration: %v != %v", a.Duration, b.Duration)
 	}
-	if a.RequestID != b.RequestID {
-		return fmt.Errorf(".JSONFormat.RequestID: %v != %v", a.RequestID, b.RequestID)
+	if a.Method != b.Method {
+		return fmt.Errorf(".JSONFormat.Method: %v != %v", a.Method, b.Method)
+	}
+	if a.Path != b.Path {
+		return fmt.Errorf(".JSONFormat.Path: %v != %v", a.Path, b.Path)
+	}
+	if a.Protocol != b.Protocol {
+		return fmt.Errorf(".JSONFormat.Protocol: %v != %v", a.Protocol, b.Protocol)
+	}
+	if a.RequestDuration != b.RequestDuration {
+		return fmt.Errorf(".JSONFormat.RequestDuration: %v != %v", a.RequestDuration, b.RequestDuration)
 	}
 	if a.RequestedServerName != b.RequestedServerName {
 		return fmt.Errorf(".JSONFormat.RequestedServerName: %v != %v", a.RequestedServerName, b.RequestedServerName)
+	}
+	if a.RequestID != b.RequestID {
+		return fmt.Errorf(".JSONFormat.RequestID: %v != %v", a.RequestID, b.RequestID)
 	}
 	if a.ResponseCode != b.ResponseCode {
 		return fmt.Errorf(".JSONFormat.ResponseCode: %v != %v", a.ResponseCode, b.ResponseCode)
 	}
 	if a.ResponseCodeDetails != b.ResponseCodeDetails {
 		return fmt.Errorf(".JSONFormat.ResponseCodeDetails: %v != %v", a.ResponseCodeDetails, b.ResponseCodeDetails)
+	}
+	if a.ResponseDuration != b.ResponseDuration {
+		return fmt.Errorf(".JSONFormat.ResponseDuration: %v != %v", a.ResponseDuration, b.ResponseDuration)
+	}
+	if a.ResponseFlags != b.ResponseFlags {
+		return fmt.Errorf(".JSONFormat.ResponseFlags: %v != %v", a.ResponseFlags, b.ResponseFlags)
+	}
+	if a.ResponseTxDuration != b.ResponseTxDuration {
+		return fmt.Errorf(".JSONFormat.ResponseTxDuration: %v != %v", a.ResponseTxDuration, b.ResponseTxDuration)
+	}
+	if a.Timestamp != b.Timestamp {
+		return fmt.Errorf(".JSONFormat.Timestamp: %v != %v", a.Timestamp, b.Timestamp)
+	}
+	if a.UberTraceID != b.UberTraceID {
+		return fmt.Errorf(".JSONFormat.UberTraceID: %v != %v", a.UberTraceID, b.UberTraceID)
+	}
+	if a.UpstreamCluster != b.UpstreamCluster {
+		return fmt.Errorf(".JSONFormat.UpstreamCluster: %v != %v", a.UpstreamCluster, b.UpstreamCluster)
 	}
 	if a.UpstreamHost != b.UpstreamHost {
 		return fmt.Errorf(".JSONFormat.UpstreamHost: %v != %v", a.UpstreamHost, b.UpstreamHost)
@@ -1100,32 +1136,11 @@ func (a JSONFormat) Compare(b JSONFormat) error {
 	if a.UpstreamServiceTime != b.UpstreamServiceTime {
 		return fmt.Errorf(".JSONFormat.UpstreamServiceTime: %v != %v", a.UpstreamServiceTime, b.UpstreamServiceTime)
 	}
-	if a.BytesReceived != b.BytesReceived {
-		return fmt.Errorf(".JSONFormat.BytesReceived: %v != %v", a.BytesReceived, b.BytesReceived)
-	}
-	if a.BytesSent != b.BytesSent {
-		return fmt.Errorf(".JSONFormat.BytesSent: %v != %v", a.BytesSent, b.BytesSent)
-	}
-	if a.DownstreamRemoteAddress != b.DownstreamRemoteAddress {
-		return fmt.Errorf(".JSONFormat.DownstreamRemoteAddress: %v != %v", a.DownstreamRemoteAddress, b.DownstreamRemoteAddress)
-	}
-	if a.Protocol != b.Protocol {
-		return fmt.Errorf(".JSONFormat.Protocol: %v != %v", a.Protocol, b.Protocol)
-	}
-	if a.ResponseFlags != b.ResponseFlags {
-		return fmt.Errorf(".JSONFormat.ResponseFlags: %v != %v", a.ResponseFlags, b.ResponseFlags)
+	if a.UserAgent != b.UserAgent {
+		return fmt.Errorf(".JSONFormat.UserAgent: %v != %v", a.UserAgent, b.UserAgent)
 	}
 	if a.XForwardedFor != b.XForwardedFor {
 		return fmt.Errorf(".JSONFormat.XForwardedFor: %v != %v", a.XForwardedFor, b.XForwardedFor)
-	}
-	if a.Path != b.Path {
-		return fmt.Errorf(".JSONFormat.Path: %v != %v", a.Path, b.Path)
-	}
-	if a.UberTraceID != b.UberTraceID {
-		return fmt.Errorf(".JSONFormat.UberTraceID: %v != %v", a.UberTraceID, b.UberTraceID)
-	}
-	if a.UpstreamCluster != b.UpstreamCluster {
-		return fmt.Errorf(".JSONFormat.UpstreamCluster: %v != %v", a.UpstreamCluster, b.UpstreamCluster)
 	}
 	return nil
 }

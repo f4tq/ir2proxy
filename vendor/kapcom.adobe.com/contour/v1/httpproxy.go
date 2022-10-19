@@ -14,6 +14,7 @@
 package v1
 
 import (
+	"kapcom.adobe.com/types"
 	"kapcom.adobe.com/xlate"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -177,6 +178,8 @@ type VirtualHost struct {
 	// The policy for rate limiting on the virtual host.
 	// +optional
 	RateLimitPolicy *RateLimitPolicy `json:"rateLimitPolicy,omitempty"`
+
+	Logging xlate.Logging `json:"adobe:logging,omitempty"`
 }
 
 // TLS describes tls properties. The CNI names that will be matched on
@@ -264,7 +267,9 @@ type Route struct {
 	//Least request load balancing config
 	// +optional
 	LeastRequestLbConfig *LeastRequestLbConfig `json:"adobe:leastRequestLbConfig, omitempty"`
-
+	//'Cookie' load balancing policy with ttl,path
+	// +optional
+	CookieLbConfig *CookieLbConfig `json:"adobe:cookieLbConfig,omitempty"`
 	// The policy for rewriting the path of the request URL
 	// after the request has been routed to a Service.
 	//
@@ -527,13 +532,79 @@ type PathRewritePolicy struct {
 	ReplacePrefix []ReplacePrefix `json:"replacePrefix,omitempty"`
 }
 
+// HeaderHashOptions contains options to configure a HTTP request header hash
+// policy, used in request attribute hash based load balancing.
+type HeaderHashOptions struct {
+	// HeaderName is the name of the HTTP request header that will be used to
+	// calculate the hash key. If the header specified is not present on a
+	// request, no hash will be produced.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	HeaderName string `json:"headerName,omitempty"`
+}
+
+// QueryParameterHashOptions contains options to configure a query parameter based hash
+// policy, used in request attribute hash based load balancing.
+type QueryParameterHashOptions struct {
+	// ParameterName is the name of the HTTP request query parameter that will be used to
+	// calculate the hash key. If the query parameter specified is not present on a
+	// request, no hash will be produced.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	ParameterName string `json:"parameterName,omitempty"`
+}
+
+// RequestHashPolicy contains configuration for an individual hash policy
+// on a request attribute.
+type RequestHashPolicy struct {
+	// Terminal is a flag that allows for short-circuiting computing of a hash
+	// for a given request. If set to true, and the request attribute specified
+	// in the attribute hash options is present, no further hash policies will
+	// be used to calculate a hash for the request.
+	Terminal bool `json:"terminal,omitempty"`
+
+	// HeaderHashOptions should be set when request header hash based load
+	// balancing is desired. It must be the only hash option field set,
+	// otherwise this request hash policy object will be ignored.
+	// +kubebuilder:validation:Required
+	HeaderHashOptions *HeaderHashOptions `json:"headerHashOptions,omitempty"`
+
+	// QueryParameterHashOptions should be set when request query parameter hash based load
+	// balancing is desired. It must be the only hash option field set,
+	// otherwise this request hash policy object will be ignored.
+	// +optional
+	QueryParameterHashOptions *QueryParameterHashOptions `json:"queryParameterHashOptions,omitempty"`
+
+	// HashSourceIP should be set to true when request source IP hash based
+	// load balancing is desired. It must be the only hash option field set,
+	// otherwise this request hash policy object will be ignored.
+	// +optional
+	HashSourceIP bool `json:"hashSourceIP,omitempty"`
+}
+
 // LoadBalancerPolicy defines the load balancing policy.
 type LoadBalancerPolicy struct {
 	Strategy string `json:"strategy,omitempty"`
+	// RequestHashPolicies contains a list of hash policies to apply when the
+	// `RequestHash` load balancing strategy is chosen. If an element of the
+	// supplied list of hash policies is invalid, it will be ignored. If the
+	// list of hash policies is empty after validation, the load balancing
+	// strategy will fall back the the default `RoundRobin`.
+	RequestHashPolicies []RequestHashPolicy `json:"requestHashPolicies,omitempty"`
 }
 
 type LeastRequestLbConfig struct {
 	ChoiceCount uint32 `json:"choiceCount,omitempty"`
+}
+
+// CookieLbConfig -- loadbalancer policy similar to upstream Cookie policy except provide ttl,path access
+type CookieLbConfig struct {
+	Name string          `json:"name"`
+	Ttl  *types.Duration `json:"ttl,omitempty"`
+	Path string          `json:"path,omitempty"`
+	// Override default 'Cookie' Loadbalancing Strategy.
+	// By default, 'Cookie' strategy uses RoundRobin.
+	Strategy string `json:"strategy,omitempty"`
 }
 
 type HeadersPolicy struct {

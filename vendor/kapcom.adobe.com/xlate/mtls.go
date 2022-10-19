@@ -53,7 +53,7 @@ func (recv *CRDHandler) tryMTLS(secret *k8s.Secret) {
 
 		if secretsLen := len(recv.mtls.caSecrets); secretsLen > 3 {
 			// keep the 3 most recent certs
-			recv.mtls.caSecrets = recv.mtls.caSecrets[3+(secretsLen-4):]
+			recv.mtls.caSecrets = recv.mtls.caSecrets[secretsLen-3:]
 		}
 
 		var buf []byte

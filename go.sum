@@ -54,8 +54,8 @@ cloud.google.com/go/storage v1.8.0/go.mod h1:Wv1Oy7z6Yz3DshWRJFhqM/UCfaWIRTdp0RX
 cloud.google.com/go/storage v1.10.0/go.mod h1:FLPqc6j+Ki4BU591ie1oL6qBQGu2Bl/tZ9ullr3+Kg0=
 cloud.google.com/go/storage v1.14.0/go.mod h1:GrKmX003DSIwi9o29oFT7YDnHYwZoctc3fOKtUw0Xmo=
 dmitri.shuralyov.com/gpu/mtl v0.0.0-20190408044501-666a987793e9/go.mod h1:H6x//7gZCb22OMCxBHrMx7a5I7Hp++hsVxbQ4BYO7hU=
-git.corp.adobe.com/fortescu/kapcom v1.18.3-0.20220826192651-633eb5640a6c h1:GFipisFsb8+1hdrMJDt/GCB2nLQsnCAStijPwvI5/hw=
-git.corp.adobe.com/fortescu/kapcom v1.18.3-0.20220826192651-633eb5640a6c/go.mod h1:nMM6YODBQAXeaVzdCMhYsCAWuL9rVxdqGbjzhuviQKg=
+git.corp.adobe.com/fortescu/kapcom v1.20.2-0.20221018223304-faef9851e80d h1:EXafEpkh+TPRD+F67MyDRBYJa5rPRS/KXZPloBvW3HQ=
+git.corp.adobe.com/fortescu/kapcom v1.20.2-0.20221018223304-faef9851e80d/go.mod h1:T+Lts2vur4onzwCYFd/PwG2B1Q9/iV9Q/sn36Wg0Qjg=
 github.com/Azure/go-autorest v14.2.0+incompatible h1:V5VMDjClD3GiElqLWO7mz2MxNAK/vTfRHdAubSIPRgs=
 github.com/Azure/go-autorest v14.2.0+incompatible/go.mod h1:r+4oMnoxhatjLLJ6zxSWATqVooLgysK6ZNox3g/xq24=
 github.com/Azure/go-autorest/autorest v0.11.1/go.mod h1:JFgpikqFJ/MleTTxwepExTKnFUKKszPS8UavbQYUMuw=

@@ -4,6 +4,7 @@ import (
 	"net"
 	"sort"
 
+	"kapcom.adobe.com/config"
 	"kapcom.adobe.com/xds"
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -11,8 +12,42 @@ import (
 	k8s "k8s.io/api/core/v1"
 )
 
-func endpointsToCLA(clusterName string, l4Addresses []l4Address,
-	cla *endpoint.ClusterLoadAssignment) {
+type (
+	l4Address struct {
+		ip   string
+		port uint32
+	}
+)
+
+func (recv l4Address) toIPU32() (u32 uint32) {
+	u8s := net.ParseIP(recv.ip).To4()
+	if len(u8s) == 4 {
+		u32 = uint32(u8s[0])<<24 | uint32(u8s[1])<<16 | uint32(u8s[2])<<8 | uint32(u8s[3])
+	}
+	return
+}
+
+func (recv l4Address) toLbEndpoint() *endpoint.LbEndpoint {
+	return &endpoint.LbEndpoint{
+		HostIdentifier: &endpoint.LbEndpoint_Endpoint{
+			Endpoint: &endpoint.Endpoint{
+				Address: &core.Address{
+					Address: &core.Address_SocketAddress{
+						SocketAddress: &core.SocketAddress{
+							Protocol: core.SocketAddress_TCP,
+							Address:  recv.ip,
+							PortSpecifier: &core.SocketAddress_PortValue{
+								PortValue: recv.port,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func (recv *CRDHandler) setCLAEndpoints(cla *endpoint.ClusterLoadAssignment, l4Addresses []l4Address) {
 
 	sort.SliceStable(l4Addresses, func(a, b int) bool {
 		aIP := net.ParseIP(l4Addresses[a].ip).To4()
@@ -31,33 +66,41 @@ func endpointsToCLA(clusterName string, l4Addresses []l4Address,
 		return aInt < bInt
 	})
 
-	lbEndpoints := make([]*endpoint.LbEndpoint, len(l4Addresses))
+	if config.EnvoyZoneAwareRouting() {
+		localities := make(map[string]*endpoint.LocalityLbEndpoints)
 
-	for i, l4Addr := range l4Addresses {
-		lbEndpoints[i] = &endpoint.LbEndpoint{
-			HostIdentifier: &endpoint.LbEndpoint_Endpoint{
-				Endpoint: &endpoint.Endpoint{
-					Address: &core.Address{
-						Address: &core.Address_SocketAddress{
-							SocketAddress: &core.SocketAddress{
-								Protocol: core.SocketAddress_TCP,
-								Address:  l4Addr.ip,
-								PortSpecifier: &core.SocketAddress_PortValue{
-									PortValue: l4Addr.port,
-								},
-							},
-						},
+		for _, l4Addr := range l4Addresses {
+			zone := recv.ip2zone[l4Addr.toIPU32()] // zone can be empty string
+
+			lle := localities[zone]
+			if lle == nil {
+				lle = &endpoint.LocalityLbEndpoints{
+					Locality: &core.Locality{
+						Zone: zone,
 					},
-				},
+				}
+				localities[zone] = lle
+			}
+
+			lle.LbEndpoints = append(lle.LbEndpoints, l4Addr.toLbEndpoint())
+		}
+
+		for _, lle := range localities {
+			cla.Endpoints = append(cla.Endpoints, lle)
+		}
+
+	} else {
+		lbEndpoints := make([]*endpoint.LbEndpoint, len(l4Addresses))
+
+		for i, l4Addr := range l4Addresses {
+			lbEndpoints[i] = l4Addr.toLbEndpoint()
+		}
+
+		cla.Endpoints = []*endpoint.LocalityLbEndpoints{
+			{
+				LbEndpoints: lbEndpoints,
 			},
 		}
-	}
-
-	cla.ClusterName = clusterName
-	cla.Endpoints = []*endpoint.LocalityLbEndpoints{
-		{
-			LbEndpoints: lbEndpoints,
-		},
 	}
 }
 
@@ -142,9 +185,11 @@ func (recv *CRDHandler) updateEDS(ns, name string) {
 					sotw.eds[clusterName] = wrapper
 				}
 
-				newCLA := &endpoint.ClusterLoadAssignment{}
-				endpointsToCLA(clusterName, l4Addresses, newCLA)
-				recv.log.Debug("endpointsToCLA", "newCLA", newCLA)
+				newCLA := &endpoint.ClusterLoadAssignment{
+					ClusterName: clusterName,
+				}
+				recv.setCLAEndpoints(newCLA, l4Addresses)
+				recv.log.Debug("setCLAEndpoints", "newCLA", newCLA)
 
 				if wrapper.CompareAndReplace(recv.log, newCLA) {
 					shouldUpdateEDS = true

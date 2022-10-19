@@ -278,9 +278,6 @@ func (recv *Manager) newCert(name string, caSecret *k8s.Secret) (secret *k8s.Sec
 		ObjectMeta: meta.ObjectMeta{
 			Name:      name,
 			Namespace: config.KAPCOMNamespace(),
-			Annotations: map[string]string{
-				annotations.CreatedEpoch: fmt.Sprintf("%v", recv.timeProvider.Now().Unix()),
-			},
 		},
 		Data: map[string][]byte{
 			k8s.TLSCertKey:       certPEM.Bytes(),
@@ -291,7 +288,7 @@ func (recv *Manager) newCert(name string, caSecret *k8s.Secret) (secret *k8s.Sec
 	return
 }
 
-func (recv *Manager) rotateCerts(certs []*k8s.Secret, kind string, nameFunc func(uint16) string, ca *k8s.Secret) {
+func (recv *Manager) rotateCerts(certs []*k8s.Secret, kind string, nameFunc func(uint16) string, ca *k8s.Secret) (certsRet []*k8s.Secret) {
 	certsLen := len(certs)
 	for i := 0; i < 3-certsLen; i++ {
 		certName := nameFunc(nextCertNum(certs))
@@ -307,6 +304,11 @@ func (recv *Manager) rotateCerts(certs []*k8s.Secret, kind string, nameFunc func
 		}
 	}
 
+	// on initial creation do not also continue to rotate
+	if certsLen == 0 {
+		return
+	}
+
 	if len(certs) < 3 {
 		recv.log.Error("could not create " + kind + " certs")
 		return
@@ -314,37 +316,30 @@ func (recv *Manager) rotateCerts(certs []*k8s.Secret, kind string, nameFunc func
 
 	sort.Stable(SecretByNumber(certs))
 
-	oldestCertEpoch, err := strconv.ParseInt(certs[0].Annotations[annotations.CreatedEpoch], 10, 64)
-	if err != nil {
-		recv.log.Error("strconv.ParseInt", "Error", err,
-			annotations.CreatedEpoch, certs[0].Annotations[annotations.CreatedEpoch])
+	oldestCert := certs[0]
+	newCert := recv.newCert(nameFunc(nextCertNum(certs)), ca)
+	if newCert == nil {
+		return
+	}
+	recv.log.Info(kind+" rotation", "oldest", oldestCert.Name, "new", newCert.Name)
+
+	if _, err := recv.api.Create(newCert, meta.CreateOptions{}); err != nil {
+		recv.log.Error("Create secret failed", "Error", err)
+		return
+	}
+	certs = append(certs, newCert)
+
+	// prior failed deletions could leave us with more than a single old cert to delete
+	for _, cert := range certs[:len(certs)-3] {
+		recv.log.Info("deleting "+kind+" cert", "name", cert.Name)
+		if err := recv.api.Delete(cert.Name, meta.DeleteOptions{}); err != nil {
+			recv.log.Error("Delete secret failed", "Error", err)
+			// don't return. we have at least created what we need
+		}
 	}
 
-	durationSinceLastRotation := time.Duration(recv.timeProvider.Now().Unix()-oldestCertEpoch) * time.Second
-
-	if durationSinceLastRotation > config.SecretRotationInterval() {
-		recv.log.Info("rotating " + kind + " certs")
-		oldestCert := certs[0]
-		newCert := recv.newCert(nameFunc(nextCertNum(certs)), ca)
-		if newCert == nil {
-			return
-		}
-		recv.log.Info(kind+" rotation", "oldest", oldestCert.Name, "new", newCert.Name)
-
-		if _, err = recv.api.Create(newCert, meta.CreateOptions{}); err != nil {
-			recv.log.Error("Create secret failed", "Error", err)
-			return
-		}
-		certs = append(certs, newCert)
-
-		// prior failed deletions could leave us with more than a single old cert to delete
-		for _, cert := range certs[:len(certs)-3] {
-			if err = recv.api.Delete(cert.Name, meta.DeleteOptions{}); err != nil {
-				recv.log.Error("Delete secret failed", "Error", err)
-				// don't return. we have at least created what we need
-			}
-		}
-	}
+	certsRet = certs
+	return
 }
 
 func (recv *Manager) Rotate() {
@@ -430,6 +425,7 @@ func (recv *Manager) Rotate() {
 		oldCACerts := caCerts[:len(caCerts)-3]
 		caCerts = caCerts[len(caCerts)-3:]
 		for _, cert := range oldCACerts {
+			recv.log.Info("deleting CA cert", "name", cert.Name)
 			if err = recv.api.Delete(cert.Name, meta.DeleteOptions{}); err != nil {
 				recv.log.Error("Delete secret failed", "Error", err)
 			}
@@ -437,15 +433,23 @@ func (recv *Manager) Rotate() {
 
 		// uint16 rollover means what was appended above might need to go first
 		sort.Stable(SecretByNumber(caCerts))
+
+		// See docs/implementation.md for why the second cert is used
+		clientCerts = recv.rotateCerts(clientCerts, "Client", ClientName, caCerts[1])
+		serverCerts = recv.rotateCerts(serverCerts, "Server", ServerName, caCerts[1])
+	}
+
+	if len(clientCerts) < 3 {
+		recv.rotateCerts(clientCerts, "Client", ClientName, caCerts[1])
+	}
+
+	if len(serverCerts) < 3 {
+		recv.rotateCerts(serverCerts, "Server", ServerName, caCerts[1])
 	}
 
 	for _, caCert := range caCerts {
 		recv.log.Debug("caCert", "name", caCert.Name, "data", len(caCert.Data))
 	}
-
-	// See docs/implementation.md for why the second cert is used
-	recv.rotateCerts(clientCerts, "Client", ClientName, caCerts[1])
-	recv.rotateCerts(serverCerts, "Server", ServerName, caCerts[1])
 }
 
 func (recv *Manager) Loop(ctx context.Context) {
@@ -455,8 +459,10 @@ func (recv *Manager) Loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			t.Reset(time.Minute)
+			// rotation can take awhile and if we reset the timer first we'll
+			// come back and the timer will already have expired
 			recv.Rotate()
+			t.Reset(time.Minute)
 		}
 	}
 }

@@ -14,6 +14,7 @@ import (
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/golang/protobuf/ptypes"
@@ -47,11 +48,16 @@ type (
 		LibraryPath       string  `json:"library_path,omitempty"`
 	}
 
+	HTTPConnectionManager struct {
+		StreamIdleTimeout types.Duration `json:"stream_idle_timeout"`
+	}
+
 	IngressClass struct {
-		Ports         map[string]PortInfo `json:"ports"`
-		DefaultCert   string              `json:"default_cert"`
-		MinTLSVersion string              `json:"min_tls_version"`
-		Tracing       *Tracing            `json:"tracing"`
+		Ports                 map[string]PortInfo   `json:"ports"`
+		DefaultCert           string                `json:"default_cert"`
+		MinTLSVersion         string                `json:"min_tls_version"`
+		Tracing               *Tracing              `json:"tracing"`
+		HTTPConnectionManager HTTPConnectionManager `json:"http_connection_manager"`
 	}
 
 	Stats struct {
@@ -113,42 +119,48 @@ func initLogFields() {
 	}
 
 	logFieldsHTTP = map[string]*_struct.Value{
-		"uber_trace_id":             sv("%REQ(UBER-TRACE-ID)%"),
-		"upstream_cluster":          sv("%UPSTREAM_CLUSTER%"),
+		"@timestamp":                sv("%START_TIME%"),
 		"authority":                 sv("%REQ(:AUTHORITY)%"),
 		"bytes_received":            sv("%BYTES_RECEIVED%"),
-		"downstream_local_address":  sv("%DOWNSTREAM_LOCAL_ADDRESS%"),
-		"duration":                  sv("%DURATION%"),
-		"protocol":                  sv("%PROTOCOL%"),
-		"response_flags":            sv("%RESPONSE_FLAGS%"),
-		"upstream_host":             sv("%UPSTREAM_HOST%"),
-		"upstream_service_time":     sv("%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"),
-		"method":                    sv("%REQ(:METHOD)%"),
-		"upstream_local_address":    sv("%UPSTREAM_LOCAL_ADDRESS%"),
-		"user_agent":                sv("%REQ(USER-AGENT)%"),
-		"x_forwarded_for":           sv("%REQ(X-FORWARDED-FOR)%"),
 		"bytes_sent":                sv("%BYTES_SENT%"),
+		"downstream_local_address":  sv("%DOWNSTREAM_LOCAL_ADDRESS%"),
 		"downstream_remote_address": sv("%DOWNSTREAM_REMOTE_ADDRESS%"),
+		"duration":                  sv("%DURATION%"),
+		"method":                    sv("%REQ(:METHOD)%"),
 		"path":                      sv("%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"),
-		"@timestamp":                sv("%START_TIME%"),
+		"protocol":                  sv("%PROTOCOL%"),
+		"request_duration":          sv("%REQUEST_DURATION%"),
 		"request_id":                sv("%REQ(X-REQUEST-ID)%"),
 		"requested_server_name":     sv("%REQUESTED_SERVER_NAME%"),
-		"response_code":             sv("%RESPONSE_CODE%"),
 		"response_code_details":     sv("%RESPONSE_CODE_DETAILS%"),
+		"response_code":             sv("%RESPONSE_CODE%"),
+		"response_duration":         sv("%RESPONSE_DURATION%"),
+		"response_flags":            sv("%RESPONSE_FLAGS%"),
+		"response_tx_duration":      sv("%RESPONSE_TX_DURATION%"),
+		"uber_trace_id":             sv("%REQ(UBER-TRACE-ID)%"),
+		"upstream_cluster":          sv("%UPSTREAM_CLUSTER%"),
+		"upstream_host":             sv("%UPSTREAM_HOST%"),
+		"upstream_local_address":    sv("%UPSTREAM_LOCAL_ADDRESS%"),
+		"upstream_service_time":     sv("%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"),
+		"user_agent":                sv("%REQ(USER-AGENT)%"),
+		"x_forwarded_for":           sv("%REQ(X-FORWARDED-FOR)%"),
 	}
 
 	logFieldsTCP = map[string]*_struct.Value{
-		"upstream_cluster":          sv("%UPSTREAM_CLUSTER%"),
+		"@timestamp":                sv("%START_TIME%"),
 		"bytes_received":            sv("%BYTES_RECEIVED%"),
+		"bytes_sent":                sv("%BYTES_SENT%"),
 		"downstream_local_address":  sv("%DOWNSTREAM_LOCAL_ADDRESS%"),
+		"downstream_remote_address": sv("%DOWNSTREAM_REMOTE_ADDRESS%"),
 		"duration":                  sv("%DURATION%"),
+		"request_duration":          sv("%REQUEST_DURATION%"),
+		"requested_server_name":     sv("%REQUESTED_SERVER_NAME%"),
+		"response_duration":         sv("%RESPONSE_DURATION%"),
 		"response_flags":            sv("%RESPONSE_FLAGS%"),
+		"response_tx_duration":      sv("%RESPONSE_TX_DURATION%"),
+		"upstream_cluster":          sv("%UPSTREAM_CLUSTER%"),
 		"upstream_host":             sv("%UPSTREAM_HOST%"),
 		"upstream_local_address":    sv("%UPSTREAM_LOCAL_ADDRESS%"),
-		"bytes_sent":                sv("%BYTES_SENT%"),
-		"downstream_remote_address": sv("%DOWNSTREAM_REMOTE_ADDRESS%"),
-		"@timestamp":                sv("%START_TIME%"),
-		"requested_server_name":     sv("%REQUESTED_SERVER_NAME%"),
 	}
 }
 
@@ -272,6 +284,9 @@ func (recv *CRDHandler) initStatsListener() {
 								HttpFilters: []*hcm.HttpFilter{
 									{
 										Name: wellknown.Router,
+										ConfigType: &hcm.HttpFilter_TypedConfig{
+											TypedConfig: util.ToAny(recv.log, &router.Router{}),
+										},
 									},
 								},
 							}),

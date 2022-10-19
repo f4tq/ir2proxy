@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	hpv1 "kapcom.adobe.com/contour/v1"
 	irv1beta1 "kapcom.adobe.com/contour/v1beta1"
@@ -28,6 +29,10 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+var (
+	IdleDefaultTimeout time.Duration  
+	ResponseDefaultTimeout time.Duration 
+)
 // IngressRouteToHTTPProxy translates IngressRoute objects to HTTPProxy ones, emitting warnings
 // as it goes.
 // There are currently no fatal conditions (that should not produces a HTTPProxy output)
@@ -96,7 +101,7 @@ func IngressRouteToHTTPProxy(ir *irv1beta1.IngressRoute) (*hpv1.HTTPProxy, []str
 				}
 				if ir.Spec.VirtualHost.TLS.MaximumProtocolVersion != "" {
 					vhost.TLS.MaximumProtocolVersion = ir.Spec.VirtualHost.TLS.MaximumProtocolVersion
-			}
+				}
 			}
 		}
 	}
@@ -150,11 +155,21 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 	}
 	route.Conditions[0].Prefix = match
 
-	if irRoute.TimeoutPolicy != nil {
+	if irRoute.Timeout != nil {
 		route.TimeoutPolicy = &hpv1.TimeoutPolicy{
-			Response: irRoute.TimeoutPolicy.Request,
+			Response: irRoute.Timeout.String(),
+		}
+	} else if irRoute.IdleTimeout != nil {
+		dur := irRoute.IdleTimeout.String()
+		if route.TimeoutPolicy == nil {
+			route.TimeoutPolicy = &hpv1.TimeoutPolicy{
+				Idle:     dur,
+			}
+		} else {
+			route.TimeoutPolicy.Idle = dur
 		}
 	}
+
 	// Adapt Adobe additions to ingressroute
 	if irRoute.RequestHeadersPolicy != nil {
 		pol := hpv1.HeadersPolicy{}
@@ -262,7 +277,7 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 		warnings = append(warnings, "ingressroute.EnableSPDY has no equivalent in httpproxy ")
 	}
 	route.PermitInsecure = irRoute.PermitInsecure
-	
+
 	var seenLBStrategy string
 	var seenHealthCheckPolicy *irv1beta1.HealthCheck
 	var seenHealthCheckServiceName string
@@ -280,15 +295,16 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 		if irService.PerPodMaxRequests != 0 {
 			warnings = append(warnings, "httpproxy has no equivalent for ingressroute route.service.perPodMaxRequests")
 		}
-		if irRoute.IdleTimeout != nil {
-			warnings = append(warnings, "httpproxy has broader IdleTimeout equivalent at the route not service level")
-			dur := irRoute.IdleTimeout.String()
-			if route.TimeoutPolicy == nil {
-				route.TimeoutPolicy = &hpv1.TimeoutPolicy{
-					Idle: dur,
-				}
+		if irService.IdleTimeout != nil {
+			if route.TimeoutPolicy != nil {
+				warnings = append(warnings, fmt.Sprintf("route level (%s) Timeout policy already defined with IdleTimeout=%s. Ignoring service level timeout of '%s'",
+					irRoute.Match,
+					route.TimeoutPolicy.Idle,
+					irService.IdleTimeout.String()))
 			} else {
-				route.TimeoutPolicy.Idle = dur
+				route.TimeoutPolicy = &hpv1.TimeoutPolicy{
+					Idle: irService.IdleTimeout.String(),
+				}
 			}
 		}
 		if irService.ConnectTimeout != nil {
@@ -300,9 +316,49 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 
 		if irRoute.HashPolicy != nil {
 			// See https://projectcontour.io/docs/v1.19.0/config/request-routing/#session-affinity
-			warnings = append(warnings, fmt.Sprintf("Ingressroute service '%s' uses Adobe add-on 'HashPolicy' triggering sticky-sessions but HTTPProxy equive (Cookie|RequestHash) have not been implemented.  Setting to the more general 'RequestHash'!", irService.Name))
-			route.LoadBalancerPolicy = &hpv1.LoadBalancerPolicy{Strategy: "RequestHash"}
-		} else if lbpolicy != nil {
+			policies := make([]hpv1.RequestHashPolicy,0)
+			for _, pol := range irRoute.HashPolicy {
+				switch {
+				case pol.ConnectionProperties != nil:
+					policies = append(policies, hpv1.RequestHashPolicy{
+						HashSourceIP: pol.ConnectionProperties.SourceIp,
+						Terminal: pol.Terminal,
+					})
+				case pol.Cookie != nil:
+					route.CookieLbConfig = &hpv1.CookieLbConfig{
+							Name: pol.Cookie.Name,
+							Path: pol.Cookie.Path,
+							Ttl:  pol.Cookie.Ttl,
+						}
+					if lbpolicy != nil {
+						route.CookieLbConfig.Strategy = lbpolicy.Strategy
+					}
+						route.LoadBalancerPolicy = &hpv1.LoadBalancerPolicy{
+							Strategy: "Cookie",
+						}
+					// disable default action of existing lbpolicy
+					lbpolicy = nil
+
+				case pol.Header != nil:
+					policies = append(policies, hpv1.RequestHashPolicy{
+						HeaderHashOptions: &hpv1.HeaderHashOptions{
+							HeaderName: pol.Header.HeaderName,
+						},
+						Terminal: pol.Terminal,
+					})
+				}
+				// There is no QueryParameter equivalent in ingressroute so not handled
+			}
+			if len(policies) > 0 {
+				if route.LoadBalancerPolicy == nil {
+					route.LoadBalancerPolicy = &hpv1.LoadBalancerPolicy{
+						Strategy: "RoundRobin",
+					}
+				}
+				route.LoadBalancerPolicy.RequestHashPolicies = policies
+			}
+		}
+		if lbpolicy != nil {
 			// go with the existing lbpolicy will prob need to be coerced to RequestHash if IngressRoute
 			if seenLBStrategy == "" {
 				// Copy the first strategy we encounter into the HP loadbalancerpolicy
@@ -314,7 +370,7 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 					warnings = append(warnings, fmt.Sprintf("Strategy %s on Service %s could not be applied, HTTPProxy only supports a single load balancing policy across all services. %s is already applied.", irService.Strategy, irService.Name, seenLBStrategy))
 				}
 			}
-		} 
+		}
 
 		if healthcheckPolicy != nil {
 			if seenHealthCheckPolicy == nil {
@@ -327,7 +383,23 @@ func translateRoute(irRoute irv1beta1.Route, routeLCP string) (hpv1.Route, []str
 				warnings = append(warnings, fmt.Sprintf("A healthcheck on service %s could not be applied, HTTPProxy only supports a single healthcheck across all services. A different healthcheck from service %s is already applied.", irService.Name, seenHealthCheckServiceName))
 			}
 		}
-
+		if route.TimeoutPolicy != nil {
+			// response and idle need values else error
+			if route.TimeoutPolicy.Response == "" {
+				route.TimeoutPolicy.Response =func() string { 
+						if ResponseDefaultTimeout == time.Duration(0) { 
+							return "infinity"
+						} 
+						return ResponseDefaultTimeout.String() }()
+			}
+			if route.TimeoutPolicy.Idle == "" {
+				route.TimeoutPolicy.Idle =func() string { 
+						if IdleDefaultTimeout == time.Duration(0) { 
+							return "infinity"
+						} 
+						return IdleDefaultTimeout.String() }()
+			}
+		}
 		route.Services = append(route.Services, service)
 	}
 
@@ -357,7 +429,7 @@ func translateService(irService irv1beta1.Service) (hpv1.Service, *hpv1.HTTPHeal
 			TimeoutSeconds:          int64(irService.HealthCheck.TimeoutSeconds),
 			UnhealthyThresholdCount: irService.HealthCheck.UnhealthyThresholdCount,
 			HealthyThresholdCount:   irService.HealthCheck.HealthyThresholdCount,
-			IntervalSeconds: 		 int64(irService.HealthCheck.IntervalSeconds),
+			IntervalSeconds:         int64(irService.HealthCheck.IntervalSeconds),
 		}
 	}
 

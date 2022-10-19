@@ -72,10 +72,13 @@ github.com/envoyproxy/go-control-plane/envoy/config/ratelimit/v3
 github.com/envoyproxy/go-control-plane/envoy/config/route/v3
 github.com/envoyproxy/go-control-plane/envoy/config/trace/v3
 github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3
+github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3
 github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/cors/v3
 github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3
+github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3
 github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ratelimit/v3
 github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3
+github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3
 github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3
 github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3
 github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3
@@ -784,7 +787,7 @@ k8s.io/utils/net
 k8s.io/utils/pointer
 k8s.io/utils/strings/slices
 k8s.io/utils/trace
-# kapcom.adobe.com v1.18.2 => git.corp.adobe.com/fortescu/kapcom v1.18.3-0.20220826192651-633eb5640a6c
+# kapcom.adobe.com v1.18.2 => git.corp.adobe.com/fortescu/kapcom v1.20.2-0.20221018223304-faef9851e80d
 ## explicit; go 1.15
 kapcom.adobe.com/certs
 kapcom.adobe.com/ciphers

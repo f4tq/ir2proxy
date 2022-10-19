@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/projectcontour/ir2proxy/cmd/kubectl-kapcom/commands"
 	"github.com/projectcontour/ir2proxy/cmd/kubectl-kapcom/commands/util"
 	"github.com/projectcontour/ir2proxy/internal/translator"
@@ -41,7 +43,8 @@ func CreateConvertCommand() *cobra.Command {
 	cmd.Flags().StringP("namespace", "n", "default", "namespace")
 	cmd.Flags().Int16P(commands.Priority, "p", 2, "set annotation kapcom.adobe.io/priority: $priority")
 	cmd.Flags().Bool(commands.Force, false, "force --apply to go forward despite warnings.  BEWARE")
-
+	cmd.Flags().Duration(commands.IdleTimeoutDefaultFlag,time.Second*58,"default route idle timeout if missing")
+	cmd.Flags().Duration(commands.ResponseTimeoutDefaultFlag,time.Duration(0),"default route idle timeout if missing")
 	return cmd
 }
 
@@ -116,7 +119,19 @@ func transform( cmd *cobra.Command, args []string) error {
 	if apply && allNs {
 		log.Fatal("--apply is restricted to maximum of namespace scope blast radius by policy")
 	}
+	idleDefault, err := cmd.Flags().GetDuration(commands.IdleTimeoutDefaultFlag)
+	if err != nil {
+		return err
+	}
+	responseDefault, err := cmd.Flags().GetDuration(commands.ResponseTimeoutDefaultFlag)
+	if err != nil {
+		return err
+	}
+	translator.IdleDefaultTimeout = idleDefault
+	translator.ResponseDefaultTimeout = responseDefault
 
+	klog.V(2).Infof("convert idleDefault %b", idleDefault)
+	klog.V(2).Infof("convert responseDefault: %b", responseDefault)
 	klog.V(2).Infof("convert namespace=%s allNamespaces=%v", ns, allNs)
 	klog.V(2).Infof("convert ingressroute=%s", ingressroute)
 	klog.V(2).Infof("convert apply=%v", apply)
@@ -159,8 +174,14 @@ func transform( cmd *cobra.Command, args []string) error {
 					}
 					continue
 				}
-				doApply(hp)
+				klog.V(4).Infof("conversion httpproxy:\n %s\n", spew.Sdump(hp))
+				_, err := doApply(hp)
+				if err != nil {
+					return fmt.Errorf("conversion to yaml %s/%s failed: %w", ir.Namespace, ir.Name, err)
+				}
+				continue
 			}
+
 			bb, err := neatYaml(hp, true, func(vv string) (string, error) {
 				// clean up emitted yaml
 				if hp.Spec.TCPProxy != nil && hp.Spec.TCPProxy.LeastRequestLbConfig == nil {
@@ -169,6 +190,15 @@ func transform( cmd *cobra.Command, args []string) error {
 						return "", fmt.Errorf("error deleting spec.tcpproxy.adobe\\:leastRequestLbConfig")
 					}
 					vv = vint
+				}
+				if hp.Spec.VirtualHost != nil {
+					if len(hp.Spec.VirtualHost.Logging.Loggers) == 0 {					    
+						vint, err := sjson.Delete(vv, "spec.virtualhost.adobe\\:logging")
+						if err != nil {
+							return "", fmt.Errorf("error deleting spec.virtualhost.adobe\\:logging" )
+						}	
+						vv = vint					
+					}
 				}
 				for kk, rr := range hp.Spec.Routes {
 					// filter out LeastRequestLbConfig from dumping if nil
@@ -200,7 +230,7 @@ func transform( cmd *cobra.Command, args []string) error {
 				return vv, nil
 			})
 			if err != nil {
-				return fmt.Errorf("conversion to yaml %s/%s: %w", ir.Namespace, ir.Name, err)
+				return fmt.Errorf("neat cleanup of %s/%s failed: %w", ir.Namespace, ir.Name, err)
 			}
 
 			if klog.V(3) {
