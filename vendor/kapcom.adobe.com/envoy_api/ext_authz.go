@@ -4,14 +4,9 @@ import (
 	"fmt"
 
 	"kapcom.adobe.com/constants"
-	"kapcom.adobe.com/util"
 
-	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	http_authz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
-	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
-	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"google.golang.org/protobuf/encoding/protojson"
-	"gopkg.in/inconshreveable/log15.v2"
 )
 
 // A wrapper around envoy's native authz.ExtAuthz with json marshaling provided by protojson
@@ -35,7 +30,12 @@ func (recv *HttpExtAuthz) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON -- uses protojson to marshall correctly
 func (recv *HttpExtAuthz) UnmarshalJSON(bb []byte) error {
-	return protojson.Unmarshal(bb, (*http_authz.ExtAuthz)(&recv.ExtAuthz))
+	err := protojson.Unmarshal(bb, (*http_authz.ExtAuthz)(&recv.ExtAuthz))
+	if err != nil {
+		return err
+	}
+	recv.ExtAuthz.TransportApiVersion = constants.DefaultApiVersion
+	return nil
 }
 func (recv *HttpExtAuthz) DeepCopy() *HttpExtAuthz {
 	rr := HttpExtAuthz{}
@@ -62,37 +62,4 @@ func (a HttpExtAuthz) Compare(b HttpExtAuthz) error {
 		return fmt.Errorf(".ExtAuth not comparable")
 	}
 	return nil
-}
-
-// DefaultSidecardAuthz Builds the default sidecar auth grpc cluster
-func DefaulAuthz() *HttpExtAuthz {
-	return BuildAuthz(constants.ExtAuthzCluster)
-}
-
-// BuildAuthz -- builds a grps->envoygrpc type HttpExtAuthz given a cluster rname
-func BuildAuthz(clustername string) *HttpExtAuthz {
-	return &HttpExtAuthz{
-		ExtAuthz: http_authz.ExtAuthz{
-			FailureModeAllow: true,
-			Services: &http_authz.ExtAuthz_GrpcService{
-				GrpcService: &core.GrpcService{
-					TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
-						EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
-							ClusterName: clustername,
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-// TypedAuthzConfig -- create a HttpFilter from an HttpExtAuthz
-func TypedAuthzConfig(log log15.Logger, eaz *HttpExtAuthz) *hcm.HttpFilter {
-	return &hcm.HttpFilter{
-		Name: wellknown.HTTPExternalAuthorization,
-		ConfigType: &hcm.HttpFilter_TypedConfig{
-			TypedConfig: util.ToAny(log, eaz),
-		},
-	}
 }

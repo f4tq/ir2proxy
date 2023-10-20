@@ -4,8 +4,17 @@ import (
 	"kapcom.adobe.com/set"
 )
 
+type shutdownReason int
+
+const (
+	normalExit = iota
+	missingNonce
+)
+
 type (
-	shutdownMsg struct{}
+	shutdownMsg struct {
+		reason shutdownReason
+	}
 
 	stateChangeMsg struct {
 		subset    EnvoySubset

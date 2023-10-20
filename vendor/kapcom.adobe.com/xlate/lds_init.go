@@ -39,13 +39,12 @@ type (
 	}
 
 	Tracing struct {
-		ClientSampling    float64 `json:"client_sampling"`
-		RandomSampling    float64 `json:"random_sampling"`
-		OverallSampling   float64 `json:"overall_sampling"`
-		Verbose           *bool   `json:"verbose"`
-		ServiceName       string  `json:"service_name,omitempty"`
-		PropagationFormat string  `json:"propagation_format,omitempty"`
-		LibraryPath       string  `json:"library_path,omitempty"`
+		ClientSampling  float64 `json:"client_sampling"`
+		RandomSampling  float64 `json:"random_sampling"`
+		OverallSampling float64 `json:"overall_sampling"`
+		Verbose         *bool   `json:"verbose"`
+		ServiceName     string  `json:"service_name,omitempty"`
+		TargetUri       string  `json:"target_uri,omitempty"`
 	}
 
 	HTTPConnectionManager struct {
@@ -206,7 +205,7 @@ func LoadIpAllowDenyConfig(log log15.Logger) (success bool) {
 
 	if len(structFields) > 0 {
 		typedConfig, err := ptypes.MarshalAny(&udpa_type.TypedStruct{
-			TypeUrl: "envoy.config.filter.network.ip_allow_deny.v2.IpAllowDeny",
+			TypeUrl: "envoy.config.filter.listener.ip_allow_deny.v3.IpAllowDeny",
 			Value: &_struct.Struct{
 				Fields: structFields,
 			},
@@ -347,14 +346,11 @@ func LoadListenerConfig(log log15.Logger, lc *ListenerConfig) (success bool) {
 	}
 	for _, ic := range lc.IngressClasses {
 		if ic.Tracing != nil {
-			if ic.Tracing.PropagationFormat == "" {
-				ic.Tracing.PropagationFormat = "jaeger"
+			if ic.Tracing.TargetUri == "" {
+				ic.Tracing.TargetUri = "127.0.0.1:4317"
 			}
 			if ic.Tracing.ServiceName == "" {
 				ic.Tracing.ServiceName = "cluster-gateway"
-			}
-			if ic.Tracing.LibraryPath == "" {
-				ic.Tracing.LibraryPath = "/opt/jaeger/jaeger-tracer.so"
 			}
 		}
 	}

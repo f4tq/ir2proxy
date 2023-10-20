@@ -176,6 +176,80 @@ func (m *RateLimit) validate(all bool) error {
 
 	// no validation rules for DisableXEnvoyRatelimitedHeader
 
+	if all {
+		switch v := interface{}(m.GetRateLimitedStatus()).(type) {
+		case interface{ ValidateAll() error }:
+			if err := v.ValidateAll(); err != nil {
+				errors = append(errors, RateLimitValidationError{
+					field:  "RateLimitedStatus",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		case interface{ Validate() error }:
+			if err := v.Validate(); err != nil {
+				errors = append(errors, RateLimitValidationError{
+					field:  "RateLimitedStatus",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		}
+	} else if v, ok := interface{}(m.GetRateLimitedStatus()).(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return RateLimitValidationError{
+				field:  "RateLimitedStatus",
+				reason: "embedded message failed validation",
+				cause:  err,
+			}
+		}
+	}
+
+	if len(m.GetResponseHeadersToAdd()) > 10 {
+		err := RateLimitValidationError{
+			field:  "ResponseHeadersToAdd",
+			reason: "value must contain no more than 10 item(s)",
+		}
+		if !all {
+			return err
+		}
+		errors = append(errors, err)
+	}
+
+	for idx, item := range m.GetResponseHeadersToAdd() {
+		_, _ = idx, item
+
+		if all {
+			switch v := interface{}(item).(type) {
+			case interface{ ValidateAll() error }:
+				if err := v.ValidateAll(); err != nil {
+					errors = append(errors, RateLimitValidationError{
+						field:  fmt.Sprintf("ResponseHeadersToAdd[%v]", idx),
+						reason: "embedded message failed validation",
+						cause:  err,
+					})
+				}
+			case interface{ Validate() error }:
+				if err := v.Validate(); err != nil {
+					errors = append(errors, RateLimitValidationError{
+						field:  fmt.Sprintf("ResponseHeadersToAdd[%v]", idx),
+						reason: "embedded message failed validation",
+						cause:  err,
+					})
+				}
+			}
+		} else if v, ok := interface{}(item).(interface{ Validate() error }); ok {
+			if err := v.Validate(); err != nil {
+				return RateLimitValidationError{
+					field:  fmt.Sprintf("ResponseHeadersToAdd[%v]", idx),
+					reason: "embedded message failed validation",
+					cause:  err,
+				}
+			}
+		}
+
+	}
+
 	if len(errors) > 0 {
 		return RateLimitMultiError(errors)
 	}
@@ -627,9 +701,20 @@ func (m *RateLimitConfig_Action) validate(all bool) error {
 
 	var errors []error
 
-	switch m.ActionSpecifier.(type) {
-
+	oneofActionSpecifierPresent := false
+	switch v := m.ActionSpecifier.(type) {
 	case *RateLimitConfig_Action_SourceCluster_:
+		if v == nil {
+			err := RateLimitConfig_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetSourceCluster()).(type) {
@@ -661,6 +746,17 @@ func (m *RateLimitConfig_Action) validate(all bool) error {
 		}
 
 	case *RateLimitConfig_Action_DestinationCluster_:
+		if v == nil {
+			err := RateLimitConfig_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetDestinationCluster()).(type) {
@@ -692,6 +788,17 @@ func (m *RateLimitConfig_Action) validate(all bool) error {
 		}
 
 	case *RateLimitConfig_Action_RequestHeaders_:
+		if v == nil {
+			err := RateLimitConfig_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetRequestHeaders()).(type) {
@@ -723,6 +830,17 @@ func (m *RateLimitConfig_Action) validate(all bool) error {
 		}
 
 	case *RateLimitConfig_Action_RemoteAddress_:
+		if v == nil {
+			err := RateLimitConfig_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetRemoteAddress()).(type) {
@@ -754,6 +872,17 @@ func (m *RateLimitConfig_Action) validate(all bool) error {
 		}
 
 	case *RateLimitConfig_Action_GenericKey_:
+		if v == nil {
+			err := RateLimitConfig_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetGenericKey()).(type) {
@@ -785,6 +914,17 @@ func (m *RateLimitConfig_Action) validate(all bool) error {
 		}
 
 	case *RateLimitConfig_Action_HeaderValueMatch_:
+		if v == nil {
+			err := RateLimitConfig_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetHeaderValueMatch()).(type) {
@@ -816,6 +956,17 @@ func (m *RateLimitConfig_Action) validate(all bool) error {
 		}
 
 	case *RateLimitConfig_Action_Metadata:
+		if v == nil {
+			err := RateLimitConfig_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetMetadata()).(type) {
@@ -847,6 +998,17 @@ func (m *RateLimitConfig_Action) validate(all bool) error {
 		}
 
 	case *RateLimitConfig_Action_Extension:
+		if v == nil {
+			err := RateLimitConfig_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetExtension()).(type) {
@@ -878,6 +1040,9 @@ func (m *RateLimitConfig_Action) validate(all bool) error {
 		}
 
 	default:
+		_ = v // ensures v is used
+	}
+	if !oneofActionSpecifierPresent {
 		err := RateLimitConfig_ActionValidationError{
 			field:  "ActionSpecifier",
 			reason: "value is required",
@@ -886,7 +1051,6 @@ func (m *RateLimitConfig_Action) validate(all bool) error {
 			return err
 		}
 		errors = append(errors, err)
-
 	}
 
 	if len(errors) > 0 {
@@ -991,9 +1155,20 @@ func (m *RateLimitConfig_Override) validate(all bool) error {
 
 	var errors []error
 
-	switch m.OverrideSpecifier.(type) {
-
+	oneofOverrideSpecifierPresent := false
+	switch v := m.OverrideSpecifier.(type) {
 	case *RateLimitConfig_Override_DynamicMetadata_:
+		if v == nil {
+			err := RateLimitConfig_OverrideValidationError{
+				field:  "OverrideSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofOverrideSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetDynamicMetadata()).(type) {
@@ -1025,6 +1200,9 @@ func (m *RateLimitConfig_Override) validate(all bool) error {
 		}
 
 	default:
+		_ = v // ensures v is used
+	}
+	if !oneofOverrideSpecifierPresent {
 		err := RateLimitConfig_OverrideValidationError{
 			field:  "OverrideSpecifier",
 			reason: "value is required",
@@ -1033,7 +1211,6 @@ func (m *RateLimitConfig_Override) validate(all bool) error {
 			return err
 		}
 		errors = append(errors, err)
-
 	}
 
 	if len(errors) > 0 {
@@ -1941,6 +2118,8 @@ func (m *RateLimitConfig_Action_MetaData) validate(all bool) error {
 		}
 		errors = append(errors, err)
 	}
+
+	// no validation rules for SkipIfAbsent
 
 	if len(errors) > 0 {
 		return RateLimitConfig_Action_MetaDataMultiError(errors)

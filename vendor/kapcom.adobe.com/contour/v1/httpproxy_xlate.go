@@ -17,8 +17,11 @@ import (
 
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	cors "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/cors/v3"
 	ext_authz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	matcher "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	metadata "github.com/envoyproxy/go-control-plane/envoy/type/metadata/v3"
+	"github.com/google/uuid"
 	wrapperspb "google.golang.org/protobuf/types/known/wrapperspb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
@@ -44,6 +47,19 @@ const IngressTypeURL = "contour.heptio.com/v1/HTTPProxy"
 type HPHandler struct {
 	handler cache.ResourceEventHandler
 	xlate.IngressStatus
+}
+
+type RouteMatcher struct {
+	Path                string
+	Prefix              string
+	Regex               string
+	PathTemplate        string
+	PathSeparatedPrefix string
+}
+
+type RewritePolicy struct {
+	PrefixRewrite       string
+	PathTemplateRewrite string
 }
 
 func HTTPProxyHandler(handler cache.ResourceEventHandler) cache.ResourceEventHandler {
@@ -91,7 +107,12 @@ func serviceToCluster(service *Service, addlInfo interface{}) (xlate.Cluster, er
 	c.Name = service.Name
 	c.Port = int32(service.Port)
 	c.Weight = service.Weight
+
 	var err error
+	c.Protocol, err = retrieveProtocol(service)
+	if err != nil {
+		return c, err
+	}
 
 	// The validation of the LoadBalancerPolicy should differ between
 	// the one defined on an TCPProxy and one defined on a Route, because certain
@@ -101,13 +122,62 @@ func serviceToCluster(service *Service, addlInfo interface{}) (xlate.Cluster, er
 			contains(tcpProxy.LoadBalancerPolicy.Strategy, []string{"RequestHash", "Cookie"}) {
 			return c, fmt.Errorf("tcpproxy does not support loadbalancing policy %s", tcpProxy.LoadBalancerPolicy.Strategy)
 		}
-		err = addLBStrategyToCluster(&c, tcpProxy.LoadBalancerPolicy, tcpProxy.LeastRequestLbConfig)
+		err = addLBStrategyToCluster(&c, tcpProxy.LoadBalancerPolicy, tcpProxy.LeastRequestLbConfig, nil)
 	} else if route, ok := addlInfo.(*Route); ok {
-		err = addLBStrategyToCluster(&c, route.LoadBalancerPolicy, route.LeastRequestLbConfig)
+		err = addLBStrategyToCluster(&c, route.LoadBalancerPolicy, route.LeastRequestLbConfig, route.CookieLbConfig)
 		addHealthCheckToCluster(&c, route.HealthCheckPolicy)
 	}
+
+	if service.SlowStartPolicy != nil {
+		window, err := time.ParseDuration(service.SlowStartPolicy.Window)
+		if err != nil {
+			return c, fmt.Errorf("unable to parse slowStartPolicy.window string %q: %s", service.SlowStartPolicy.Window, err)
+		}
+
+		aggression := float64(1.0)
+		if service.SlowStartPolicy.Aggression != "" {
+			aggression, err = strconv.ParseFloat(service.SlowStartPolicy.Aggression, 64)
+			if err != nil {
+				return c, fmt.Errorf("unable to parse slowStartPolicy.aggression string %q: %s", service.SlowStartPolicy.Aggression, err)
+			}
+		}
+
+		if service.SlowStartPolicy.MinimumWeightPercent > 100 {
+			return c, fmt.Errorf("invalid slowStartPolicy.minWeightPercent value '%v'", service.SlowStartPolicy.MinimumWeightPercent)
+		}
+
+		// slow start is only supported in Round Robin and Least Request load balancer types
+		// https://www.envoyproxy.io/docs/envoy/v1.24.0/intro/arch_overview/upstream/load_balancing/slow_start
+		if c.LbPolicy != nil && *c.LbPolicy != cluster.Cluster_ROUND_ROBIN && *c.LbPolicy != cluster.Cluster_LEAST_REQUEST {
+			return c, fmt.Errorf("slowStartPolicy only supported with 'RoundRobin' and 'WeightedLeastRequest' load balancing policies")
+		}
+
+		c.SlowStartConfig = &xlate.SlowStartConfig{
+			SlowStartWindow:  window,
+			Aggression:       aggression,
+			MinWeightPercent: service.SlowStartPolicy.MinimumWeightPercent,
+		}
+	}
+
 	return c, err
 }
+
+func retrieveProtocol(service *Service) (protocol string, err error) {
+	if service.Protocol == nil {
+		return
+	}
+
+	protocol = *service.Protocol
+
+	switch protocol {
+	case "h2c", "h2", "tls":
+	default:
+		err = fmt.Errorf("protocol is not supported: %v", protocol)
+	}
+
+	return
+}
+
 func transformLeastRequest(leastRequestConfig *LeastRequestLbConfig) (*xlate.LeastRequestLbConfig, error) {
 	if leastRequestConfig != nil {
 		choiceCount := leastRequestConfig.ChoiceCount
@@ -122,40 +192,57 @@ func transformLeastRequest(leastRequestConfig *LeastRequestLbConfig) (*xlate.Lea
 	}
 	return nil, nil
 }
-func addLBStrategyToCluster(c *xlate.Cluster, lbpolicy *LoadBalancerPolicy, leastRequestConfig *LeastRequestLbConfig) (err error) {
+
+func addLBStrategyToCluster(c *xlate.Cluster, lbpolicy *LoadBalancerPolicy, leastRequestConfig *LeastRequestLbConfig, cookieConfig *CookieLbConfig) (err error) {
 	if lbpolicy == nil {
 		return nil
 	}
 	switch lbpolicy.Strategy {
 	case "WeightedLeastRequest":
-		c.LbPolicy = cluster.Cluster_LEAST_REQUEST
+		c.LbPolicy = cluster.Cluster_LEAST_REQUEST.Enum()
 		c.LeastRequestLbConfig, err = transformLeastRequest(leastRequestConfig)
 		if err != nil {
 			return err
 		}
 	case "Random":
-		c.LbPolicy = cluster.Cluster_RANDOM
+		c.LbPolicy = cluster.Cluster_RANDOM.Enum()
 	case "Cookie":
 		if len(lbpolicy.RequestHashPolicies) != 0 {
 			return errors.New("policy Cookie accepts no RequestHashPolies")
 		}
-		c.LbPolicy = cluster.Cluster_ROUND_ROBIN
+		// The 'Cookie' strategy default is 'RoundRobin'; can be overriden later with CookieLbConfig
+		c.LbPolicy = cluster.Cluster_ROUND_ROBIN.Enum()
+		if cookieConfig != nil && cookieConfig.Strategy != "" {
+			switch cookieConfig.Strategy {
+			case "Random":
+				c.LbPolicy = cluster.Cluster_RANDOM.Enum()
+			case "Maglev":
+				c.LbPolicy = cluster.Cluster_MAGLEV.Enum()
+			case "RingHash":
+				c.LbPolicy = cluster.Cluster_RING_HASH.Enum()
+			case "WeightedLeastRequest":
+				c.LbPolicy = cluster.Cluster_LEAST_REQUEST.Enum()
+				c.LeastRequestLbConfig, err = transformLeastRequest(leastRequestConfig)
+				if err != nil {
+					return errors.New(fmt.Sprintf("cookie lb strategy override error %s ", err.Error()))
+				}
+			case "RoundRobin":
+				c.LbPolicy = cluster.Cluster_ROUND_ROBIN.Enum()
+			default:
+				return errors.New(fmt.Sprintf("invalid cookie lb strategy override '%s'", cookieConfig.Strategy))
+			}
+		}
 	case "RequestHash":
 		if len(lbpolicy.RequestHashPolicies) == 0 {
 			return errors.New("policy RequestHash chosen but no policies provided")
 		}
-		// per upstream -> RR
-		c.LbPolicy = cluster.Cluster_ROUND_ROBIN
-	// Moreover the HTTPProxy specs don't explicitly mention
-	// "RingHash" and "Maglev" as valid values for an HTTP request
-	// It's unclear as to why that's the case, especially since
-	// Envoy does seem to continue supporting them
+		fallthrough
 	case "RingHash":
-		c.LbPolicy = cluster.Cluster_RING_HASH
+		c.LbPolicy = cluster.Cluster_RING_HASH.Enum()
 	case "Maglev":
-		c.LbPolicy = cluster.Cluster_MAGLEV
-	default: // includes explicit RoundRobin
-		c.LbPolicy = cluster.Cluster_ROUND_ROBIN
+		c.LbPolicy = cluster.Cluster_MAGLEV.Enum()
+	case "RoundRobin":
+		c.LbPolicy = cluster.Cluster_ROUND_ROBIN.Enum()
 	}
 
 	return nil
@@ -176,10 +263,10 @@ func addHealthCheckToCluster(c *xlate.Cluster, hc *HTTPHealthCheckPolicy) {
 	}
 }
 
-func extractHeaderMatcher(conditions []Condition) (string, []xlate.HeaderMatcher, error) {
+func extractIncludeConditionsMatchers(conditions []IncludeCondition) (string, []xlate.HeaderMatcher, error) {
 	// A single prefix must be present
 	if conditions == nil {
-		return "", nil, errors.New("No header matching info was provided")
+		return "", nil, errors.New("No prefix/header matching info was provided")
 	}
 	matchPrefix := ""
 	headerMatchers := make([]xlate.HeaderMatcher, 0)
@@ -214,6 +301,95 @@ func extractHeaderMatcher(conditions []Condition) (string, []xlate.HeaderMatcher
 		}
 	}
 	return matchPrefix, headerMatchers, validateHeaderMatchers(headerMatchers)
+}
+
+func extractConditionsMatchers(conditions []Condition) (*RouteMatcher, []xlate.HeaderMatcher, error) {
+	routeMatcher := new(RouteMatcher)
+	if conditions == nil {
+		return routeMatcher, nil, errors.New("No route/header matching info was provided")
+	}
+	headerMatchers := make([]xlate.HeaderMatcher, 0)
+	// A single prefix/path/regex/path template/path separated prefix must be present
+	for _, cond := range conditions {
+
+		if err := validateCondition(cond); err != nil {
+			return routeMatcher, nil, err
+		}
+		if (routeMatcher.Path != "" || routeMatcher.Prefix != "" || routeMatcher.Regex != "" || routeMatcher.PathTemplate != "" || routeMatcher.PathSeparatedPrefix != "") &&
+			(cond.Path != "" || cond.Prefix != "" || cond.Regex != "" || cond.PathTemplate != "" || cond.PathSeparatedPrefix != "") {
+			err := errors.New("Matcher for Route has multiple rules defined")
+			return routeMatcher, nil, err
+		}
+
+		if routeMatcher.Path == "" {
+			// set the exact path match for the delegated route
+			routeMatcher.Path = cond.Path
+		}
+		if routeMatcher.Prefix == "" {
+			// set the prefix match for the delegated route
+			routeMatcher.Prefix = cond.Prefix
+		}
+		if routeMatcher.Regex == "" {
+			// set the path regex match for the delegated route
+			routeMatcher.Regex = cond.Regex
+		}
+		if routeMatcher.PathTemplate == "" {
+			// set the path template match for the delegated route
+			routeMatcher.PathTemplate = cond.PathTemplate
+		}
+		if routeMatcher.PathSeparatedPrefix == "" {
+			// set the path seperated prefix match for the delegated route
+			routeMatcher.PathSeparatedPrefix = cond.PathSeparatedPrefix
+		}
+		if cond.Header != nil {
+			presentPtr := new(bool)
+			*presentPtr = cond.Header.Present
+			hm := xlate.HeaderMatcher{
+				Name:        cond.Header.Name,
+				Contains:    cond.Header.Contains,
+				NotContains: cond.Header.NotContains,
+				Exact:       cond.Header.Exact,
+				NotExact:    cond.Header.NotExact,
+			}
+			if cond.Header.Present {
+				hm.Present = presentPtr
+			}
+			// TODO(lrouquet): implement "notpresent": https://github.com/projectcontour/contour/blob/v1.22.1/apis/projectcontour/v1/httpproxy.go#L90-L94
+			headerMatchers = append(headerMatchers, hm)
+		}
+	}
+	return routeMatcher, headerMatchers, validateHeaderMatchers(headerMatchers)
+}
+
+func validateCondition(cond Condition) error {
+	if cond.Header != nil && cond.Path != "" {
+		return errors.New("Condition can not have both: a Path and a HeaderCondition")
+	}
+
+	if cond.Header != nil && cond.Prefix != "" {
+		return errors.New("Condition can not have both: a Prefix and a HeaderCondition")
+	}
+
+	if cond.Header != nil && cond.Regex != "" {
+		return errors.New("Condition can not have both: a Regex and a HeaderCondition")
+	}
+
+	if cond.Header != nil && cond.PathTemplate != "" {
+		return errors.New("Condition can not have both: a PathTemplate and a HeaderCondition")
+	}
+
+	if cond.Header != nil && cond.PathSeparatedPrefix != "" {
+		return errors.New("Condition can not have both: a PathSeparatedPrefix and a HeaderCondition")
+	}
+
+	if (cond.Path != "" && (cond.Prefix != "" || cond.Regex != "" || cond.PathTemplate != "" || cond.PathSeparatedPrefix != "")) ||
+		(cond.Prefix != "" && (cond.Regex != "" || cond.PathTemplate != "" || cond.PathSeparatedPrefix != "")) ||
+		(cond.Regex != "" && (cond.PathTemplate != "" || cond.PathSeparatedPrefix != "")) ||
+		(cond.PathTemplate != "" && cond.PathSeparatedPrefix != "") {
+		return errors.New("Condition can only have one of: Path, Prefix, Regex, PathTemplate or PathSeparatedPrefix match defined")
+	}
+
+	return nil
 }
 
 func validateHeaderMatchers(headerMatchers []xlate.HeaderMatcher) (err error) {
@@ -301,6 +477,7 @@ func contains(item string, list []string) bool {
 	}
 	return false
 }
+
 func validateRatelimitPolicy(policy *RateLimitPolicy) error {
 	// See https://projectcontour.io/docs/v1.15.2/config/rate-limiting/#defining-a-global-rate-limit-policy
 	// and https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/route/v3/route_components.proto#envoy-v3-api-msg-config-route-v3-ratelimit
@@ -320,17 +497,17 @@ func validateRatelimitPolicy(policy *RateLimitPolicy) error {
 			if entry.GenericKey == nil &&
 				entry.RemoteAddress == nil &&
 				entry.RequestHeader == nil &&
-				entry.RequestHeaderValueMatch == nil {
-				return errors.New("need one of generickey, remoteaddress,requestheader or requestheader")
+				entry.RequestHeaderValueMatch == nil &&
+				entry.Metadata == nil {
+				return errors.New("need one of generickey, remoteaddress, requestheader or metadata")
 			}
 			if entry.GenericKey != nil {
 				// must be one of
 				if entry.GenericKey.Value == "" {
 					return errors.New("generickey must have value")
-
 				}
 				if entry.GenericKey.Key == "" {
-					entry.GenericKey.Key = "generic-key"
+					entry.GenericKey.Key = "generic_key"
 				}
 			}
 			// ok
@@ -357,15 +534,35 @@ func validateRatelimitPolicy(policy *RateLimitPolicy) error {
 				if rq.DescriptorKey == "" {
 					return errors.New("request header descriptor key must have a value")
 				}
-				//ok
+				// ok
+			}
+			if entry.Metadata != nil {
+				md := entry.Metadata
+				if md.DescriptorKey == "" {
+					return errors.New("descriptorKey must have a value")
+				}
+				if md.MetadataKey == nil {
+					return errors.New("metadataKey must be specified")
+				}
+				if md.MetadataKey.Key == "" {
+					return errors.New("a key must be defined in metadataKey")
+				}
+				if len(md.MetadataKey.Path) == 0 {
+					return errors.New("A path to retrieve the value of a metadataKey must be defined")
+				}
+				// ok
 			}
 		}
 	}
 	return nil
 }
 
-//func CrdToRatelimt(rd.Spec.VirtualHost.RateLimitPolicy)
+// func CrdToRatelimt(rd.Spec.VirtualHost.RateLimitPolicy)
 func CrdToRateLimit(policy *RateLimitPolicy) ([]*envoy_api.RateLimit, error) {
+	if !xlate.RateLimitEnabled() {
+		return nil, nil
+	}
+
 	rateLimits := make([]*envoy_api.RateLimit, len(policy.Global.Descriptors))
 	ref := policy.Global.Descriptors
 	for ii, descriptor := range ref {
@@ -378,6 +575,7 @@ func CrdToRateLimit(policy *RateLimitPolicy) ([]*envoy_api.RateLimit, error) {
 
 				action.ActionSpecifier = &route.RateLimit_Action_GenericKey_{
 					GenericKey: &route.RateLimit_Action_GenericKey{
+						DescriptorKey:   entry.GenericKey.Key,
 						DescriptorValue: entry.GenericKey.Value,
 					},
 				}
@@ -419,31 +617,41 @@ func CrdToRateLimit(policy *RateLimitPolicy) ([]*envoy_api.RateLimit, error) {
 					}
 					switch {
 					case header.Contains != "":
-						hh.HeaderMatchSpecifier = &route.HeaderMatcher_SafeRegexMatch{
-							SafeRegexMatch: &matcher.RegexMatcher{
-								EngineType: &matcher.RegexMatcher_GoogleRe2{
-									GoogleRe2: &matcher.RegexMatcher_GoogleRE2{},
+						hh.HeaderMatchSpecifier = &route.HeaderMatcher_StringMatch{
+							StringMatch: &matcher.StringMatcher{
+								MatchPattern: &matcher.StringMatcher_SafeRegex{
+									SafeRegex: &matcher.RegexMatcher{
+										Regex: fmt.Sprintf(".*%s.*", header.Contains),
+									},
 								},
-								Regex: fmt.Sprintf(".*%s.*", header.Contains),
 							},
 						}
 					case header.NotContains != "":
-						hh.HeaderMatchSpecifier = &route.HeaderMatcher_SafeRegexMatch{
-							SafeRegexMatch: &matcher.RegexMatcher{
-								EngineType: &matcher.RegexMatcher_GoogleRe2{
-									GoogleRe2: &matcher.RegexMatcher_GoogleRE2{},
+						hh.HeaderMatchSpecifier = &route.HeaderMatcher_StringMatch{
+							StringMatch: &matcher.StringMatcher{
+								MatchPattern: &matcher.StringMatcher_SafeRegex{
+									SafeRegex: &matcher.RegexMatcher{
+										Regex: fmt.Sprintf(".*%s.*", header.NotContains),
+									},
 								},
-								Regex: fmt.Sprintf(".*%s.*", header.NotContains),
 							},
 						}
 						hh.InvertMatch = true
 					case header.Exact != "":
-						hh.HeaderMatchSpecifier = &route.HeaderMatcher_ExactMatch{
-							ExactMatch: header.Exact,
+						hh.HeaderMatchSpecifier = &route.HeaderMatcher_StringMatch{
+							StringMatch: &matcher.StringMatcher{
+								MatchPattern: &matcher.StringMatcher_Exact{
+									Exact: header.Exact,
+								},
+							},
 						}
 					case header.NotExact != "":
-						hh.HeaderMatchSpecifier = &route.HeaderMatcher_ExactMatch{
-							ExactMatch: header.Exact,
+						hh.HeaderMatchSpecifier = &route.HeaderMatcher_StringMatch{
+							StringMatch: &matcher.StringMatcher{
+								MatchPattern: &matcher.StringMatcher_Exact{
+									Exact: header.Exact,
+								},
+							},
 						}
 						hh.InvertMatch = true
 
@@ -456,6 +664,28 @@ func CrdToRateLimit(policy *RateLimitPolicy) ([]*envoy_api.RateLimit, error) {
 					hv.HeaderValueMatch.Headers[ii] = &hh
 				}
 				action.ActionSpecifier = hv
+				pol.Actions = append(pol.Actions, &action)
+			}
+			if entry.Metadata != nil {
+				action := route.RateLimit_Action{}
+				pathSegment := make([]*metadata.MetadataKey_PathSegment, 0)
+				for _, v := range entry.Metadata.MetadataKey.Path {
+					pathSegment = append(pathSegment, &metadata.MetadataKey_PathSegment{
+						Segment: &metadata.MetadataKey_PathSegment_Key{
+							Key: v,
+						},
+					})
+				}
+				action.ActionSpecifier = &route.RateLimit_Action_Metadata{
+					Metadata: &route.RateLimit_Action_MetaData{
+						DescriptorKey: entry.Metadata.DescriptorKey,
+						MetadataKey: &metadata.MetadataKey{
+							Key:  entry.Metadata.MetadataKey.Key,
+							Path: pathSegment,
+						},
+						DefaultValue: entry.Metadata.DefaultValue,
+					},
+				}
 				pol.Actions = append(pol.Actions, &action)
 			}
 		}
@@ -524,6 +754,12 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 			priority, err := strconv.ParseInt(priorityAnnot, 10, 0)
 			if err == nil {
 				ingress.Priority = int(priority)
+			}
+		}
+		if migrationID := crd.Annotations[annotations.MigrationID]; migrationID != "" {
+			ingress.MigrationID, err = uuid.Parse(migrationID)
+			if err != nil {
+				ingress.CRDError = "Invalid " + annotations.MigrationID + " annotation: " + migrationID
 			}
 		}
 	}
@@ -628,7 +864,7 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 				}
 			}
 			cpol := &envoy_api.CorsPolicy{
-				CorsPolicy: route.CorsPolicy{},
+				CorsPolicy: cors.CorsPolicy{},
 			}
 			methods := make([]string, len(pol.AllowMethods))
 			for idx, ii := range pol.AllowMethods {
@@ -649,7 +885,6 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 						Exact: ii,
 					},
 				}
-
 			}
 			cpol.AllowHeaders = strings.Join(headers, ",")
 			cpol.AllowMethods = strings.Join(methods, ",")
@@ -708,38 +943,81 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 	}
 	// route validation moved to xlate package
 	for _, route := range crd.Spec.Routes {
-		if len(route.Services) == 0 && route.Redirect == nil {
-			ingress.CRDError = "Route has no Services or Redirect"
+		if len(route.Services) == 0 && route.Redirect == nil && route.DirectResponsePolicy == nil {
+			ingress.CRDError = "Route has no Services or Redirect or DirectResponsePolicy"
 			continue
 		}
 
-		if len(route.Services) > 0 && route.Redirect != nil {
-			ingress.CRDError = "Route has both Services and Redirect"
-			continue
+		if len(route.Services) > 0 {
+			if route.Redirect != nil {
+				ingress.CRDError = "Route has both Services and Redirect"
+				continue
+			}
+			if route.DirectResponsePolicy != nil {
+				ingress.CRDError = "Route has both Services and DirectResponse"
+				continue
+			}
+		} else {
+			if route.Redirect != nil && route.DirectResponsePolicy != nil {
+				ingress.CRDError = "Route has both Redirect and DirectResponse"
+				continue
+			}
 		}
 
-		// A single prefix must be present
-		matchPrefix, headerMatchers, err := extractHeaderMatcher(route.Conditions)
+		// A single prefix/path/regex must be present
+		routeMatcher, headerMatchers, err := extractConditionsMatchers(route.Conditions)
 		if err != nil {
 			ingress.CRDError = err.Error()
 			continue
 		}
 
 		xRoute := new(xlate.Route)
-		xRoute.Match = matchPrefix
+		xRoute.Match = routeMatcher.Prefix
+		xRoute.Path = routeMatcher.Path
+		xRoute.Regex = routeMatcher.Regex
+		xRoute.PathTemplate = routeMatcher.PathTemplate
+		xRoute.PathSeparatedPrefix = routeMatcher.PathSeparatedPrefix
+
 		// HTTPProxy does not support PrefixRewrite
 		// partial support for now - only what IngressRoute supports
-		if prp := route.PathRewritePolicy; prp != nil && len(prp.ReplacePrefix) > 0 {
-			xRoute.PrefixRewrite = prp.ReplacePrefix[0].Replacement
+		if prp := route.PathRewritePolicy; prp != nil {
+			if len(prp.ReplacePrefix) > 0 {
+				xRoute.PrefixRewrite = prp.ReplacePrefix[0].Replacement
+			}
+			if len(prp.ReplacePathTemplate) > 0 {
+				xRoute.PathTemplateRewrite = prp.ReplacePathTemplate[0].Replacement
+			}
 		}
+		if xRoute.PrefixRewrite != "" && xRoute.PathTemplateRewrite != "" {
+			ingress.CRDError = "Route has both ReplacePrefix and ReplacePathTemplate rewrite policies defined"
+			continue
+		}
+		if xRoute.PathTemplate != "" && xRoute.PrefixRewrite != "" {
+			ingress.CRDError = "Route can not have a ReplacePrefix rewrite policy for a PathTemplate match condition"
+			continue
+		}
+
 		xRoute.WebsocketUpgrade = route.EnableWebsockets
 		xRoute.HTTPSRedirect = !route.PermitInsecure
 		xRoute.HeaderMatchers = headerMatchers
+
+		if route.Tracing != nil {
+			xRoute.Tracing = &xlate.RouteTracing{
+				ClientSampling: route.Tracing.ClientSampling,
+				RandomSampling: route.Tracing.RandomSampling,
+			}
+		}
 
 		if route.RetryPolicy != nil {
 			xRoute.RetryPolicy = &xlate.RetryPolicy{
 				NumRetries:    route.RetryPolicy.NumRetries,
 				PerTryTimeout: route.RetryPolicy.PerTryTimeout,
+			}
+		}
+
+		if route.DirectResponsePolicy != nil {
+			xRoute.DirectResponseAction = &xlate.DirectResponseAction{
+				Status: route.DirectResponsePolicy.StatusCode,
 			}
 		}
 
@@ -793,7 +1071,7 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 			if xRoute.PerFilterConfig == nil {
 				xRoute.PerFilterConfig = &xlate.PerFilterConfig{}
 			}
-			var pf = xRoute.PerFilterConfig
+			pf := xRoute.PerFilterConfig
 			// route AuthPolicy can either be Disabled OR provide a context but not both
 			if route.AuthPolicy.Disabled {
 				pf.Authz = &xlate.ExtAuthzPerRoute{
@@ -867,27 +1145,32 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 				ingress.CRDError = err.Error()
 				return ingress
 			}
-			if route.LoadBalancerPolicy != nil && route.LoadBalancerPolicy.Strategy == "Cookie" &&
-				route.CookieLbConfig != nil && route.CookieLbConfig.Strategy != "" {
-				// the cookie policy wants to override the default 'Cookie' lb policy RoundRobin
-				switch route.CookieLbConfig.Strategy {
-				case "Random":
-					xRoute.Clusters[i].LbPolicy = cluster.Cluster_RANDOM
-				case "Maglev":
-					xRoute.Clusters[i].LbPolicy = cluster.Cluster_MAGLEV
-				case "RingHash":
-					xRoute.Clusters[i].LbPolicy = cluster.Cluster_RING_HASH
-				case "WeightedLeastRequest":
-					xRoute.Clusters[i].LbPolicy = cluster.Cluster_LEAST_REQUEST
-					lq, err := transformLeastRequest(route.LeastRequestLbConfig)
-					if err != nil {
-						ingress.CRDError = fmt.Sprintf("cookie lb strategy overide error %s ", err.Error())
-						return ingress
-					}
-					xRoute.Clusters[i].LeastRequestLbConfig = lq
-					// default is already RoundRobin
-				}
 
+			if route.TimeoutPolicy != nil {
+				// Set idleConnection on all clusters
+				if route.TimeoutPolicy.IdleConnection == "infinity" {
+					xRoute.Clusters[i].IdleTimeout = -1
+				} else if route.TimeoutPolicy.IdleConnection != "" {
+					idle, _ := time.ParseDuration(route.TimeoutPolicy.IdleConnection)
+					if idle >= 0 {
+						xRoute.Clusters[i].IdleTimeout = idle
+					} else {
+						ingress.CRDError = "invalid Route idleConnection timeout"
+						continue
+					}
+				}
+				// Set connectTimeout on all clusters
+				if route.TimeoutPolicy.Connect != "" {
+					connect, _ := time.ParseDuration(route.TimeoutPolicy.Connect)
+					// value must be greater than 0s
+					// https://github.com/envoyproxy/go-control-plane/blob/v0.10.1/envoy/config/cluster/v3/cluster.pb.validate.go#L284
+					if connect > 0 {
+						xRoute.Clusters[i].ConnectTimeout = connect
+					} else {
+						ingress.CRDError = "invalid Route connect timeout"
+						continue
+					}
+				}
 			}
 		}
 
@@ -903,8 +1186,8 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 	// TODO(lev) add validations that exclude routes with HeaderMatcher values
 	// showing up elsewhere, either in another Include or in another Route
 	for _, delegatedRoute := range crd.Spec.Includes {
-		// A single prefix must be present
-		matchPrefix, headerMatchers, err := extractHeaderMatcher(delegatedRoute.Conditions)
+		// A single prefix/path/regex must be present
+		matchPrefix, headerMatchers, err := extractIncludeConditionsMatchers(delegatedRoute.Conditions)
 		if err != nil {
 			ingress.CRDError = err.Error()
 			continue
@@ -914,10 +1197,17 @@ func (recv *HPHandler) CRDToIngress(crd *HTTPProxy) *xlate.Ingress {
 		xRoute.Match = matchPrefix
 		// PrefixRewrite is not supported in the version of HTTPProxy presently being introduced to KAPCOM
 		xRoute.HeaderMatchers = headerMatchers
+
+		// save the delegate name and namespace
+		// as well as the conditions that are saved for generating the route
 		xRoute.Delegate = &xlate.Delegate{
-			Name:      delegatedRoute.Name,
-			Namespace: delegatedRoute.Namespace,
+			Name:           delegatedRoute.Name,
+			Namespace:      delegatedRoute.Namespace,
+			Inherit:        true,
+			Prefix:         matchPrefix,
+			HeaderMatchers: headerMatchers,
 		}
+
 		// What HTTPProxy calls "Includes" is called "Delegate" in xlate
 		// However, note that while HTTPProxy models delegetad routes as Includes,
 		// and keeps them separate from Routes defined to a service, xlate and

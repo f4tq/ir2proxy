@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"kapcom.adobe.com/config"
+	"kapcom.adobe.com/constants"
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	"github.com/golang/protobuf/ptypes"
@@ -28,6 +29,6 @@ func ConfigSource() *core.ConfigSource {
 			Ads: &core.AggregatedConfigSource{},
 		},
 		InitialFetchTimeout: timeout,
-		ResourceApiVersion:  core.ApiVersion_V3,
+		ResourceApiVersion:  constants.DefaultApiVersion,
 	}
 }

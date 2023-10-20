@@ -11,13 +11,13 @@ import (
 )
 
 /*
-	Register & manage envoy TypedPerFilterConfig instances
-	Handles
-	- Many are proto based with oneof members (poly typed)
-    - Allows specific overrides (user defined types) for otherwise native Struct_* types
-	- Maintains and project inteface for handling specific, user defined types including complex types such as Ratelimit, or ExtAuthz
+		Register & manage envoy TypedPerFilterConfig instances
+		Handles
+		- Many are proto based with oneof members (poly typed)
+	    - Allows specific overrides (user defined types) for otherwise native Struct_* types
+		- Maintains and project inteface for handling specific, user defined types including complex types such as Ratelimit, or ExtAuthz
 
-	If a given type has no type conversion registered, a map[string]*json.RawMessage is returned and can be retrieved by perfilter key
+		If a given type has no type conversion registered, a map[string]*json.RawMessage is returned and can be retrieved by perfilter key
 */
 type (
 	FilterCreator               func() (interface{}, error)

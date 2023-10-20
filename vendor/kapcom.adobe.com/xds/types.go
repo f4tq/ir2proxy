@@ -6,7 +6,7 @@ import (
 
 type (
 	RouteConfigurationMeta struct {
-		Clusters        set.Set
+		Class           string
 		ClustersWarming set.Set
 	}
 )

@@ -21,6 +21,7 @@ import (
 	"kapcom.adobe.com/xds"
 
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/golang/protobuf/proto"
 	"github.com/prometheus/client_golang/prometheus"
@@ -152,8 +153,8 @@ func init() {
 func Start(ctx context.Context, log log15.Logger,
 	updateSotW func(xds.EnvoySubset, xds.TypeURL, set.Set),
 	exitChan chan<- uint8,
-	syncChan chan<- struct{}) *CRDHandler {
-
+	syncChan chan<- struct{},
+) *CRDHandler {
 	if statusUpdateHandler == nil {
 		statusUpdateHandler = createStatusHandler(ctx, log)
 	}
@@ -199,8 +200,8 @@ func Start(ctx context.Context, log log15.Logger,
 }
 
 func TestStart(ctx context.Context, log log15.Logger,
-	updateSotW func(xds.EnvoySubset, xds.TypeURL, set.Set)) *CRDHandler {
-
+	updateSotW func(xds.EnvoySubset, xds.TypeURL, set.Set),
+) *CRDHandler {
 	return Start(ctx, log, updateSotW, make(chan uint8), make(chan struct{}))
 }
 
@@ -516,7 +517,6 @@ func (recv *CRDHandler) cleanupFailedDelegations(ingress *Ingress) {
 				}
 			}
 		}
-
 	}
 }
 
@@ -562,6 +562,8 @@ routesLoop:
 		}
 
 		delegate := route.Delegate
+		delegatesChain := DelegatesChain{}
+		delegatesChain.Append(delegate)
 
 	delegateResolutionLoop:
 		for {
@@ -593,6 +595,20 @@ routesLoop:
 				continue routesLoop
 			}
 
+			if !recv.delegateAuthValid(ingress, *ingressNext) {
+				recv.log.Warn("delegation failed",
+					"delegator_ns", ingressOriginal.Namespace, "delegator_name", ingressOriginal.Name,
+					"delegate_ns", ns, "delegate_name", delegate.Name,
+					"route_match", route.Match, "reason", "delegate requires auth",
+				)
+				recv.getNS(ns).addFailedDelegation(
+					recv.log, delegate.Name,
+					recv.getNS(ingressOriginal.Namespace).getIngressPtr(ingressOriginal),
+				)
+				ingress.SetInvalid("delegate requires auth")
+				return
+			}
+
 			if !(*ingressNext).Valid() {
 				recv.log.Warn("delegation failed",
 					"delegator_ns", ingressOriginal.Namespace, "delegator_name", ingressOriginal.Name,
@@ -611,18 +627,30 @@ routesLoop:
 				return
 			}
 
+			if delegatesChain.Inherits() && (*ingressNext).Fqdn != "" {
+				recv.log.Warn("delegate defines a FQDN",
+					"ns", (*ingressNext).Namespace, "name", (*ingressNext).Name, "route", route.Match, "FQDN", (*ingressNext).Fqdn)
+				ingress.SetInvalid("delegate defines a FQDN")
+				return
+			}
+
 			anyRoutesMatched := false
 			for _, routeToMatch := range (*ingressNext).VirtualHost.Routes {
 				if _, exists := nonDelegatedRoutes[routeToMatch.Match]; exists {
 					continue
 				}
 
-				// the route we're delegating (e.g. /a) must be part of the
-				// delegate path which may be more specific (e.g. /a or /a/b)
-				if !strings.HasPrefix(routeToMatch.Match, route.Match) {
-					continue
+				if delegate.Inherit {
+					// do not try to match the prefix when using HTTPProxy's "includes"
+					anyRoutesMatched = true
+				} else {
+					// the route we're delegating (e.g. /a) must be part of the
+					// delegate path which may be more specific (e.g. /a or /a/b)
+					if !strings.HasPrefix(routeToMatch.Match, route.Match) {
+						continue
+					}
+					anyRoutesMatched = true
 				}
-				anyRoutesMatched = true
 
 				if routeToMatch.Delegate != nil {
 					// assume success and remove tracking
@@ -631,11 +659,18 @@ routesLoop:
 						recv.getNS(ingressOriginal.Namespace).getIngressPtr(ingressOriginal),
 					)
 
+					// save the delegate in the chain before moving on to the next ingress
+					delegatesChain.Append(routeToMatch.Delegate)
+
 					// before reassigning delegate and ingress
 					ingress = *ingressNext
 					delegate = routeToMatch.Delegate
+
 					continue delegateResolutionLoop
 				}
+
+				// save the chain of delegations that can lead to this ingress
+				routeToMatch.SaveDelegatesChain(ingressOriginal, delegatesChain)
 
 				recv.log.Info("route delegated",
 					"delegator_ns", ingressOriginal.Namespace, "delegator_name", ingressOriginal.Name,
@@ -812,7 +847,6 @@ func (recv *CRDHandler) resolveTCPProxyDelegation(ingressOriginal *Ingress) {
 }
 
 func (recv *CRDHandler) checkFQDN(ingress *Ingress) {
-
 	if strings.Contains(ingress.Fqdn, "*") {
 		if !strings.HasPrefix(ingress.Fqdn, "*") {
 			ingress.SetInvalid("Wildcard misplaced in FQDN")
@@ -953,9 +987,9 @@ func (recv *CRDHandler) mutateTLS(ingress *Ingress) {
 			recv.log.Debug("certificate delegation ALLOWED",
 				"ns", ingress.Namespace, "name", ingress.Name, "secret_name", tls.SecretName)
 		} else {
-			ingress.SetInvalid(fmt.Sprintf("certificate delegation of %s not allowed", tls.SecretName))
-			recv.log.Debug("certificate delegation not allowed",
+			recv.log.Warn("certificate delegation not allowed",
 				"ns", ingress.Namespace, "name", ingress.Name, "secret_name", tls.SecretName)
+			ingress.SetInvalid(fmt.Sprintf("certificate delegation of %s not allowed", tls.SecretName))
 		}
 	default:
 		recv.log.Warn("invalid SecretName on Ingress",
@@ -970,6 +1004,7 @@ func (recv *CRDHandler) mutateIngress(ingress, ingressOld *Ingress) {
 		recv.resolveRouteDelegations(ingressOld)
 		recv.resolveTCPProxyDelegation(ingressOld)
 		recv.mutateTLS(ingressOld)
+		recv.checkAuth(ingressOld)
 
 		// During an update the service references could change so we assume a
 		// change and cleanup references here
@@ -1000,6 +1035,14 @@ func (recv *CRDHandler) mutateIngress(ingress, ingressOld *Ingress) {
 		recv.mutateTLS(ingress)
 	}
 
+	var authIssue bool
+	if ingress.Valid() {
+		recv.checkAuth(ingress)
+		if !ingress.Valid() {
+			authIssue = true
+		}
+	}
+
 	if !ingress.Valid() {
 		if err := ingress.ValidationError; err != "" {
 			recv.log.Warn("Invalid Ingress", "ns", ingress.Namespace, "name", ingress.Name, "err", err)
@@ -1008,7 +1051,13 @@ func (recv *CRDHandler) mutateIngress(ingress, ingressOld *Ingress) {
 		}
 	}
 
+	if authIssue {
+		recv.updateStatus(ingress)
+		return
+	}
+
 	// We maintain references even if the Ingress is invalid
+	// (except in case of root auth issues)
 	//
 	// The alternative will only cause issues if this Ingress becomes valid again
 	//
@@ -1031,7 +1080,6 @@ func (recv *CRDHandler) updateStatus(ingress *Ingress) {
 }
 
 func (recv *CRDHandler) delegatorsFunc(possibleDelegate *Ingress) func(bool) {
-
 	possibleDelegators := make(map[*Ingress]interface{})
 	// Ensure that we capture any Ingresses that have delegates
 	//
@@ -1068,6 +1116,7 @@ func (recv *CRDHandler) delegatorsFunc(possibleDelegate *Ingress) func(bool) {
 
 			if ingress.Valid() {
 				recv.updateRDS(ingress, nil)
+				recv.updateLDS(ingress, nil)
 			} else {
 				// cleanup of CDS or EDS resources is done in cleanXDS
 				recv.removeFilterChainMatch(ingress)
@@ -1091,9 +1140,15 @@ func (recv *CRDHandler) checkFailedDelegations(ingress *Ingress, triggerXDS bool
 				continue
 			}
 			recv.log.Debug("mutating Ingress for failed delegation")
-			recv.mutateIngress(*iPtr, nil)
+
+			iPtrOld := (*iPtr).DeepCopy()
+
+			// this is effectively an update of the delegator which now has
+			// different config
+			recv.mutateIngress(*iPtr, iPtrOld)
 			if triggerXDS {
-				recv.updateRDS(*iPtr, nil)
+				recv.updateRDS(*iPtr, iPtrOld)
+				recv.updateLDS(*iPtr, iPtrOld)
 			}
 		}
 	}
@@ -1130,7 +1185,6 @@ outer:
 // common between LDS and RDS
 func (recv *CRDHandler) commonUpdateLogic(ingress, ingressOld *Ingress,
 	f func(*Ingress)) (success bool) {
-
 	if ingress == nil {
 		recv.log.Warn("Ingress is nil")
 		return
@@ -1145,7 +1199,6 @@ func (recv *CRDHandler) commonUpdateLogic(ingress, ingressOld *Ingress,
 	}
 
 	if ingressOld != nil {
-
 		if ingressOld.Fqdn != ingress.Fqdn {
 			// the fqdn changed
 			f(ingressOld)
@@ -1171,7 +1224,7 @@ func (recv *CRDHandler) channelMonitor(ctx context.Context, exitChan chan<- uint
 		// don't let resyncs stack
 		backlogStallThreshold = uint(resync / loopInterval)
 	} else {
-		backlogStallThreshold = 18 // 3 minutes
+		backlogStallThreshold = 60 // 10 minutes
 	}
 
 	t := time.NewTimer(0)
@@ -1208,9 +1261,13 @@ func (recv *CRDHandler) CleanupXDS() {
 
 		for _, iface := range sotw.rds {
 			iface.(xds.Wrapper).Read(func(msg proto.Message, meta interface{}) {
-				rcMeta := (meta).(*xds.RouteConfigurationMeta)
+				rc := msg.(*route.RouteConfiguration)
 
-				activeCDS = set.Union(activeCDS, rcMeta.Clusters)
+				xds.MapVHosts(rc, func(vh *route.VirtualHost) {
+					xds.MapClusterNames(vh, func(clusterName string) {
+						activeCDS[clusterName] = nil
+					})
+				})
 			})
 		}
 
@@ -1383,7 +1440,6 @@ func (recv *CRDHandler) addUpdateService(service *k8s.Service) {
 
 // CDS and EDS SotWs are handled in CleanupXDS
 func (recv *CRDHandler) deleteService(service *k8s.Service) {
-
 	recv.getNS(service.Namespace).deleteService(recv.log, service)
 
 	// Service is needed to form the cluster name and weights
@@ -1714,7 +1770,7 @@ func (recv *CRDHandler) loop(ctx context.Context, exitChan chan<- uint8, syncCha
 											}
 											recv.updateCDS(ingress.Namespace, ingress.Name)
 											recv.updateEDS(ingress.Namespace, ingress.Name)
-											recv.updateLDS(ingress, nil) //e.g. remove it!
+											recv.updateLDS(ingress, nil) // e.g. remove it!
 											recv.updateRDS(ingress, nil)
 											recv.updateSDS(ingress, nil)
 											recv.checkFailedDelegations(ingress, doTriggerXDS)

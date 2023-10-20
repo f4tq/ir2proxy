@@ -743,7 +743,7 @@ func (recv *Cluster) UnmarshalJSON(bs []byte) error {
 		return err
 	}
 	definedFields := map[string]interface {
-	}{"@type": nil, "type": nil, "name": nil, "eds_cluster_config": nil, "upstream_connection_options": nil, "connect_timeout": nil, "circuit_breakers": nil, "common_lb_config": nil, "alt_stat_name": nil, "common_http_protocol_options": nil, "http2_protocol_options": nil, "drain_connections_on_host_removal": nil, "health_checks": nil, "lb_policy": nil, "transport_socket": nil, "load_assignment": nil, "ignore_health_on_host_removal": nil}
+	}{"@type": nil, "type": nil, "name": nil, "eds_cluster_config": nil, "upstream_connection_options": nil, "connect_timeout": nil, "circuit_breakers": nil, "common_lb_config": nil, "alt_stat_name": nil, "common_http_protocol_options": nil, "http2_protocol_options": nil, "drain_connections_on_host_removal": nil, "health_checks": nil, "lb_policy": nil, "transport_socket": nil, "load_assignment": nil, "typed_extension_protocol_options": nil, "ignore_health_on_host_removal": nil}
 	for key := range allFields {
 		if _, exists := definedFields[key]; !exists {
 			return errors.New(".Cluster JSON contains unknown key: " + key)
@@ -766,6 +766,7 @@ func (recv *Cluster) UnmarshalJSON(bs []byte) error {
 		LbPolicy                      string                    `json:"lb_policy,omitempty"`
 		TransportSocket               *TransportSocket          `json:"transport_socket,omitempty"`
 		LoadAssignment                LoadAssignment            `json:"load_assignment,omitempty"`
+		TypedExtensionProtocolOptions map[string]*Any           `json:"typed_extension_protocol_options,omitempty" nocompare`
 		IgnoreHealthOnHostRemoval     bool                      `json:"ignore_health_on_host_removal,omitempty" nocompare`
 	}{}
 	if err := json.Unmarshal(bs, &anon); err != nil {
@@ -787,6 +788,7 @@ func (recv *Cluster) UnmarshalJSON(bs []byte) error {
 	recv.LbPolicy = anon.LbPolicy
 	recv.TransportSocket = anon.TransportSocket
 	recv.LoadAssignment = anon.LoadAssignment
+	recv.TypedExtensionProtocolOptions = anon.TypedExtensionProtocolOptions
 	recv.IgnoreHealthOnHostRemoval = anon.IgnoreHealthOnHostRemoval
 	return nil
 }
@@ -2238,22 +2240,28 @@ func (recv *Match) UnmarshalJSON(bs []byte) error {
 		return err
 	}
 	definedFields := map[string]interface {
-	}{"prefix": nil, "path": nil, "headers": nil}
+	}{"prefix": nil, "path": nil, "safe_regex": nil, "path_match_policy": nil, "path_separated_prefix": nil, "headers": nil}
 	for key := range allFields {
 		if _, exists := definedFields[key]; !exists {
 			return errors.New(".Match JSON contains unknown key: " + key)
 		}
 	}
 	anon := struct {
-		Prefix  string          `json:"prefix,omitempty"`
-		Path    string          `json:"path,omitempty"`
-		Headers []HeaderMatcher `json:"headers,omitempty"`
+		Prefix              string               `json:"prefix,omitempty"`
+		Path                string               `json:"path,omitempty"`
+		SafeRegex           RegexMatcher         `json:"safe_regex,omitempty"`
+		PathMatchPolicy     TypedExtensionConfig `json:"path_match_policy,omitempty"`
+		PathSeparatedPrefix string               `json:"path_separated_prefix,omitempty"`
+		Headers             []HeaderMatcher      `json:"headers,omitempty"`
 	}{}
 	if err := json.Unmarshal(bs, &anon); err != nil {
 		return errors.New(".Match" + err.Error())
 	}
 	recv.Prefix = anon.Prefix
 	recv.Path = anon.Path
+	recv.SafeRegex = anon.SafeRegex
+	recv.PathMatchPolicy = anon.PathMatchPolicy
+	recv.PathSeparatedPrefix = anon.PathSeparatedPrefix
 	recv.Headers = anon.Headers
 	return nil
 }
@@ -2263,6 +2271,15 @@ func (a Match) Compare(b Match) error {
 	}
 	if a.Path != b.Path {
 		return fmt.Errorf(".Match.Path: %v != %v", a.Path, b.Path)
+	}
+	if err := a.SafeRegex.Compare(b.SafeRegex); err != nil {
+		return errors.New(".Match" + err.Error())
+	}
+	if err := a.PathMatchPolicy.Compare(b.PathMatchPolicy); err != nil {
+		return errors.New(".Match" + err.Error())
+	}
+	if a.PathSeparatedPrefix != b.PathSeparatedPrefix {
+		return fmt.Errorf(".Match.PathSeparatedPrefix: %v != %v", a.PathSeparatedPrefix, b.PathSeparatedPrefix)
 	}
 	if len(a.Headers) != len(b.Headers) {
 		return errors.New(".Match.Headers mismatching lengths")
@@ -2281,29 +2298,27 @@ func (recv *HeaderMatcher) UnmarshalJSON(bs []byte) error {
 		return err
 	}
 	definedFields := map[string]interface {
-	}{"name": nil, "exact_match": nil, "safe_regex_match": nil, "range_match": nil, "present_match": nil, "prefix_match": nil, "suffix_match": nil, "contains_match": nil, "invert_match": nil}
+	}{"name": nil, "exact_match": nil, "range_match": nil, "present_match": nil, "prefix_match": nil, "suffix_match": nil, "contains_match": nil, "invert_match": nil}
 	for key := range allFields {
 		if _, exists := definedFields[key]; !exists {
 			return errors.New(".HeaderMatcher JSON contains unknown key: " + key)
 		}
 	}
 	anon := struct {
-		Name           string       `json:"name,omitempty"`
-		ExactMatch     string       `json:"exact_match,omitempty"`
-		SafeRegexMatch RegexMatcher `json:"safe_regex_match,omitempty"`
-		RangeMatch     Int64Range   `json:"range_match,omitempty"`
-		PresentMatch   bool         `json:"present_match,omitempty"`
-		PrefixMatch    string       `json:"prefix_match,omitempty"`
-		SuffixMatch    string       `json:"suffix_match,omitempty"`
-		ContainsMatch  string       `json:"contains_match,omitempty"`
-		InvertMatch    bool         `json:"invert_match,omitempty"`
+		Name          string     `json:"name,omitempty"`
+		ExactMatch    string     `json:"exact_match,omitempty"`
+		RangeMatch    Int64Range `json:"range_match,omitempty"`
+		PresentMatch  bool       `json:"present_match,omitempty"`
+		PrefixMatch   string     `json:"prefix_match,omitempty"`
+		SuffixMatch   string     `json:"suffix_match,omitempty"`
+		ContainsMatch string     `json:"contains_match,omitempty"`
+		InvertMatch   bool       `json:"invert_match,omitempty"`
 	}{}
 	if err := json.Unmarshal(bs, &anon); err != nil {
 		return errors.New(".HeaderMatcher" + err.Error())
 	}
 	recv.Name = anon.Name
 	recv.ExactMatch = anon.ExactMatch
-	recv.SafeRegexMatch = anon.SafeRegexMatch
 	recv.RangeMatch = anon.RangeMatch
 	recv.PresentMatch = anon.PresentMatch
 	recv.PrefixMatch = anon.PrefixMatch
@@ -2318,9 +2333,6 @@ func (a HeaderMatcher) Compare(b HeaderMatcher) error {
 	}
 	if a.ExactMatch != b.ExactMatch {
 		return fmt.Errorf(".HeaderMatcher.ExactMatch: %v != %v", a.ExactMatch, b.ExactMatch)
-	}
-	if err := a.SafeRegexMatch.Compare(b.SafeRegexMatch); err != nil {
-		return errors.New(".HeaderMatcher" + err.Error())
 	}
 	if err := a.RangeMatch.Compare(b.RangeMatch); err != nil {
 		return errors.New(".HeaderMatcher" + err.Error())
@@ -2395,6 +2407,36 @@ func (recv *GoogleRE2) UnmarshalJSON(bs []byte) error {
 	return nil
 }
 func (a GoogleRE2) Compare(b GoogleRE2) error {
+	return nil
+}
+func (recv *TypedExtensionConfig) UnmarshalJSON(bs []byte) error {
+	allFields := make(map[string]interface {
+	})
+	if err := json.Unmarshal(bs, &allFields); err != nil {
+		return err
+	}
+	definedFields := map[string]interface {
+	}{"name": nil, "typed_config": nil}
+	for key := range allFields {
+		if _, exists := definedFields[key]; !exists {
+			return errors.New(".TypedExtensionConfig JSON contains unknown key: " + key)
+		}
+	}
+	anon := struct {
+		Name        string `json:"name,omitempty"`
+		TypedConfig *Any   `json:"typed_config,omitempty" nocompare`
+	}{}
+	if err := json.Unmarshal(bs, &anon); err != nil {
+		return errors.New(".TypedExtensionConfig" + err.Error())
+	}
+	recv.Name = anon.Name
+	recv.TypedConfig = anon.TypedConfig
+	return nil
+}
+func (a TypedExtensionConfig) Compare(b TypedExtensionConfig) error {
+	if a.Name != b.Name {
+		return fmt.Errorf(".TypedExtensionConfig.Name: %v != %v", a.Name, b.Name)
+	}
 	return nil
 }
 func (recv *Int64Range) UnmarshalJSON(bs []byte) error {
@@ -2632,21 +2674,19 @@ func (recv *WeightedClusters) UnmarshalJSON(bs []byte) error {
 		return err
 	}
 	definedFields := map[string]interface {
-	}{"clusters": nil, "total_weight": nil}
+	}{"clusters": nil}
 	for key := range allFields {
 		if _, exists := definedFields[key]; !exists {
 			return errors.New(".WeightedClusters JSON contains unknown key: " + key)
 		}
 	}
 	anon := struct {
-		Clusters    []ClusterWeight `json:"clusters,omitempty"`
-		TotalWeight int             `json:"total_weight,omitempty"`
+		Clusters []ClusterWeight `json:"clusters,omitempty"`
 	}{}
 	if err := json.Unmarshal(bs, &anon); err != nil {
 		return errors.New(".WeightedClusters" + err.Error())
 	}
 	recv.Clusters = anon.Clusters
-	recv.TotalWeight = anon.TotalWeight
 	return nil
 }
 func (a WeightedClusters) Compare(b WeightedClusters) error {
@@ -2658,9 +2698,6 @@ func (a WeightedClusters) Compare(b WeightedClusters) error {
 			return errors.New(".WeightedClusters" + err.Error())
 		}
 	}
-	if a.TotalWeight != b.TotalWeight {
-		return fmt.Errorf(".WeightedClusters.TotalWeight: %v != %v", a.TotalWeight, b.TotalWeight)
-	}
 	return nil
 }
 func (recv *RouteAction) UnmarshalJSON(bs []byte) error {
@@ -2670,24 +2707,25 @@ func (recv *RouteAction) UnmarshalJSON(bs []byte) error {
 		return err
 	}
 	definedFields := map[string]interface {
-	}{"cluster": nil, "weighted_clusters": nil, "timeout": nil, "upgrade_configs": nil, "hash_policy": nil, "idle_timeout": nil, "host_rewrite_literal": nil, "prefix_rewrite": nil, "retry_policy": nil, "rate_limits": nil, "cors": nil}
+	}{"cluster": nil, "weighted_clusters": nil, "timeout": nil, "upgrade_configs": nil, "hash_policy": nil, "idle_timeout": nil, "host_rewrite_literal": nil, "prefix_rewrite": nil, "path_rewrite_policy": nil, "retry_policy": nil, "rate_limits": nil, "cors": nil}
 	for key := range allFields {
 		if _, exists := definedFields[key]; !exists {
 			return errors.New(".RouteAction JSON contains unknown key: " + key)
 		}
 	}
 	anon := struct {
-		Cluster            string           `json:"cluster,omitempty" nocompare`
-		WeightedClusters   WeightedClusters `json:"weighted_clusters,omitempty"`
-		Timeout            string           `json:"timeout,omitempty"`
-		UpgradeConfigs     []UpgradeConfigs `json:"upgrade_configs,omitempty"`
-		HashPolicy         []HashPolicy     `json:"hash_policy,omitempty"`
-		IdleTimeout        string           `json:"idle_timeout,omitempty"`
-		HostRewriteLiteral string           `json:"host_rewrite_literal,omitempty"`
-		PrefixRewrite      string           `json:"prefix_rewrite,omitempty"`
-		RetryPolicy        RetryPolicy      `json:"retry_policy,omitempty"`
-		RateLimits         []RateLimit      `json:"rate_limits,omitempty"`
-		Cors               CorsPolicy       `json:"cors,omitempty" kapcom:"forcecompare"`
+		Cluster            string               `json:"cluster,omitempty" nocompare`
+		WeightedClusters   WeightedClusters     `json:"weighted_clusters,omitempty"`
+		Timeout            string               `json:"timeout,omitempty"`
+		UpgradeConfigs     []UpgradeConfigs     `json:"upgrade_configs,omitempty"`
+		HashPolicy         []HashPolicy         `json:"hash_policy,omitempty"`
+		IdleTimeout        string               `json:"idle_timeout,omitempty"`
+		HostRewriteLiteral string               `json:"host_rewrite_literal,omitempty"`
+		PrefixRewrite      string               `json:"prefix_rewrite,omitempty"`
+		PathRewritePolicy  TypedExtensionConfig `json:"path_rewrite_policy,omitempty"`
+		RetryPolicy        RetryPolicy          `json:"retry_policy,omitempty"`
+		RateLimits         []RateLimit          `json:"rate_limits,omitempty"`
+		Cors               CorsPolicy           `json:"cors,omitempty" kapcom:"forcecompare"`
 	}{}
 	if err := json.Unmarshal(bs, &anon); err != nil {
 		return errors.New(".RouteAction" + err.Error())
@@ -2700,6 +2738,7 @@ func (recv *RouteAction) UnmarshalJSON(bs []byte) error {
 	recv.IdleTimeout = anon.IdleTimeout
 	recv.HostRewriteLiteral = anon.HostRewriteLiteral
 	recv.PrefixRewrite = anon.PrefixRewrite
+	recv.PathRewritePolicy = anon.PathRewritePolicy
 	recv.RetryPolicy = anon.RetryPolicy
 	recv.RateLimits = anon.RateLimits
 	recv.Cors = anon.Cors
@@ -2736,6 +2775,9 @@ func (a RouteAction) Compare(b RouteAction) error {
 	}
 	if a.PrefixRewrite != b.PrefixRewrite {
 		return fmt.Errorf(".RouteAction.PrefixRewrite: %v != %v", a.PrefixRewrite, b.PrefixRewrite)
+	}
+	if err := a.PathRewritePolicy.Compare(b.PathRewritePolicy); err != nil {
+		return errors.New(".RouteAction" + err.Error())
 	}
 	if err := a.RetryPolicy.Compare(b.RetryPolicy); err != nil {
 		return errors.New(".RouteAction" + err.Error())
@@ -3201,7 +3243,7 @@ func (recv *VirtualHost) UnmarshalJSON(bs []byte) error {
 		return err
 	}
 	definedFields := map[string]interface {
-	}{"name": nil, "cors": nil, "domains": nil, "routes": nil, "retry_policy": nil, "typed_per_filter_config": nil, "rate_limits": nil}
+	}{"name": nil, "domains": nil, "routes": nil, "retry_policy": nil, "typed_per_filter_config": nil, "rate_limits": nil}
 	for key := range allFields {
 		if _, exists := definedFields[key]; !exists {
 			return errors.New(".VirtualHost JSON contains unknown key: " + key)
@@ -3209,7 +3251,6 @@ func (recv *VirtualHost) UnmarshalJSON(bs []byte) error {
 	}
 	anon := struct {
 		Name                 string               `json:"name,omitempty" nocompare`
-		Cors                 CorsPolicy           `json:"cors,omitempty" kapcom:"forcecompare""`
 		Domains              []string             `json:"domains,omitempty"`
 		Routes               []Route              `json:"routes,omitempty"`
 		RetryPolicy          RetryPolicy          `json:"retry_policy,omitempty"`
@@ -3220,7 +3261,6 @@ func (recv *VirtualHost) UnmarshalJSON(bs []byte) error {
 		return errors.New(".VirtualHost" + err.Error())
 	}
 	recv.Name = anon.Name
-	recv.Cors = anon.Cors
 	recv.Domains = anon.Domains
 	recv.Routes = anon.Routes
 	recv.RetryPolicy = anon.RetryPolicy
@@ -3229,9 +3269,6 @@ func (recv *VirtualHost) UnmarshalJSON(bs []byte) error {
 	return nil
 }
 func (a VirtualHost) Compare(b VirtualHost) error {
-	if err := a.Cors.Compare(b.Cors); err != nil {
-		return errors.New(".VirtualHost" + err.Error())
-	}
 	if len(a.Domains) != len(b.Domains) {
 		return errors.New(".VirtualHost.Domains mismatching lengths")
 	}

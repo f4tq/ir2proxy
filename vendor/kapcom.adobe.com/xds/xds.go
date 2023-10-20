@@ -15,6 +15,7 @@ import (
 
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	resource "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
@@ -76,15 +77,6 @@ var (
 		Name:      "envoy_connections",
 		Help:      "Current number of Envoy connections.",
 	})
-	xdsEnvoychanFull = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: constants.ProgramNameLower,
-			Subsystem: "xds",
-			Name:      "envoychan_full",
-			Help:      "Total number of Envoy chan full (e.g. connection dropped).",
-		},
-		[]string{"id"},
-	)
 	xdsServerchanBacklog = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: constants.ProgramNameLower,
 		Subsystem: "xds",
@@ -97,13 +89,19 @@ var (
 		Name:      "state_changes",
 		Help:      "Total number of xDS state changes.",
 	})
+	grpcMetrics = grpc_prometheus.NewServerMetrics(
+		grpc_prometheus.CounterOption(func(o *prometheus.CounterOpts) {
+			o.Namespace = constants.ProgramNameLower
+			o.Subsystem = "xds"
+		}),
+	)
 )
 
 func init() {
 	prometheus.MustRegister(xdsEnvoyConnections)
-	prometheus.MustRegister(xdsEnvoychanFull)
 	prometheus.MustRegister(xdsServerchanBacklog)
 	prometheus.MustRegister(xdsStateChanges)
+	prometheus.MustRegister(grpcMetrics)
 }
 
 func (recv TypeURL) XDS() string {
@@ -227,14 +225,14 @@ func (recv *adsServerImpl) loop(ctx context.Context, resetChan <-chan struct{}) 
 		case <-ctx.Done():
 			recv.log.Info("XDS server stopping")
 			for _, envoyConn := range recv.nodeEnvoys {
-				envoyConn.thisChan <- shutdownMsg{}
+				envoyConn.thisChan <- shutdownMsg{normalExit}
 			}
 			recv.log.Info("XDS server stopped")
 			return
 
 		case <-resetChan:
 			for _, envoyConn := range recv.nodeEnvoys {
-				envoyConn.thisChan <- shutdownMsg{}
+				envoyConn.thisChan <- shutdownMsg{normalExit}
 			}
 
 		case <-t.C:
@@ -313,23 +311,7 @@ func (recv *adsServerImpl) loop(ctx context.Context, resetChan <-chan struct{}) 
 
 				for streamId := range recv.getSubsetStreams(msg.subset) {
 					envoyConn := recv.nodeEnvoys[streamId]
-					select {
-					case envoyConn.thisChan <- msg:
-						chanLen := len(envoyConn.thisChan)
-						if chanLen >= recv.xdsWarnThreshold {
-							envoyConn.log.Warn("channel nearly full", "len", chanLen, "max", config.XDSBacklog())
-						}
-					default:
-						// when Envoy gets backlogged up to config.XDSBacklog()
-						// we don't drop updates (which could cause an outage)
-						//
-						// instead we break the connection and let the batching
-						// logic that occurs during handling of InitialResourceVersions
-						// catch Envoy up to the config it needs
-						envoyConn.log.Error("channel full. breaking connection", "max", config.XDSBacklog())
-						envoyConn.thisChan <- shutdownMsg{}
-						xdsEnvoychanFull.WithLabelValues(envoyConn.nodeId).Inc()
-					}
+					envoyConn.saveState(msg.typeUrl, msg.resources)
 				}
 			}
 		}
@@ -401,7 +383,11 @@ func Serve(ctx context.Context, log log15.Logger, xdsInitChan chan<- struct{}, e
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime: 30 * time.Second, // commensurate with clusters['kapcom'].http2_protocol_options.connection_keepalive.interval on the envoy side
 		}),
+		grpc.UnaryInterceptor(grpcMetrics.UnaryServerInterceptor()),
+		grpc.StreamInterceptor(grpcMetrics.StreamServerInterceptor()),
 	}...)
+
+	grpcMetrics.InitializeMetrics(grpcServer)
 
 	// Configure health checking
 	// a readiness probe can use this since grpc starts after resources are sync-ed
@@ -445,10 +431,11 @@ func StateChange(subset EnvoySubset, typeUrl TypeURL, resources set.Set) {
 		resources: resourceKeysCopy,
 	}
 
+	xdsServerchanBacklog.Inc()
 	select {
 	case adsServer.serverChan <- msg:
-		xdsServerchanBacklog.Inc()
 	default:
 		adsServer.log.Warn("channel full")
+		adsServer.serverChan <- msg
 	}
 }

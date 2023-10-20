@@ -46,6 +46,7 @@ type (
 		KapcomEnvoyConfigDumpUrl string `long:"kapcom-envoy-config-dump-url" description:"envoy config dump url" env:"KAPCOM_ENVOY_CONFIG_DUMP_URL"`
 		Envoy                    struct {
 			ZoneAwareRouting Truthy `long:"zone-aware-routing" env:"ZONE_AWARE_ROUTING" description:"enable zone-aware routing in Envoy (true|t|yes|y|on|1)"`
+			DefaultLbPolicy  string `long:"default-lb-policy" required:"false" description:"default load balancer policy" env:"DEFAULT_LB_POLICY"`
 		} `group:"Envoy" namespace:"envoy" env-namespace:"ENVOY" description:"Envoy options"`
 		Contour struct {
 			EnvoyConfigDumpUrl string `long:"envoy-config-dump-url" description:"envoy config dump url" env:"ENVOY_CONFIG_DUMP_URL"`
@@ -54,10 +55,20 @@ type (
 		PodIPUint32            uint32
 		HostIP                 string        `long:"host-ip" required:"false" description:"host ip"  env:"HOST_IP"`
 		SecretRotationInterval time.Duration `long:"secret-rotation-interval" default:"60m" description:"secret rotation interval" env:"SECRET_ROTATION_INTERVAL"`
-		Grpc                   struct {
+		ExtAuthz               struct {
+			Rewrites Truthy `long:"rewrites" env:"REWRITES" description:"enable dynamic forward proxying (true|t|yes|y|on|1)"`
+		} `group:"ext-authz" namespace:"ext-authz" env-namespace:"EXT_AUTHZ" `
+		UpstreamTrustedCerts string `long:"upstream-trusted-certs" default:"/etc/ssl/certs/ca-certificates.crt" description:"upstream trusted certs" env:"UPSTREAM_TRUSTED_CERTS"`
+		Grpc                 struct {
 			Tracing Truthy `long:"tracing" env:"TRACING" description:"enable grpc tracing (true|t|yes|y|on|1)"`
 			ALS     struct {
 				Enabled Truthy `long:"enabled" env:"ENABLED" description:"enable gRPC ALS integration (true|t|yes|y|on|1)"`
+				Global  struct {
+					Host          string `long:"host" env:"HOST" `
+					Port          uint16 `long:"port" env:"PORT" `
+					HeaderMatch   string `default:"x-api-key" long:"header-match" env:"HEADER_MATCH" `
+					MetadataMatch string `default:"api_key" long:"metadata-match" env:"METADATA_MATCH" `
+				} `group:"global" namespace:"global" env-namespace:"GLOBAL" `
 			} `group:"als" namespace:"als" env-namespace:"ALS" `
 		} `group:"grpc" namespace:"grpc" env-namespace:"GRPC" `
 		Kubernetes struct {
@@ -103,10 +114,8 @@ var (
 	Log    log15.Logger
 )
 
-func init() {
+func Init() {
 	Log = log15.New()
-}
-func for_tests (){
 	// initial parse the environment.
 	Parser().ParseArgs([]string{})
 	Info()
@@ -156,7 +165,7 @@ type ConfigParser interface {
 }
 
 // Parser - returns a parser with all submodule flags embedded
-//func Parser() *flags.Parser {
+// func Parser() *flags.Parser {
 func Parser() ConfigParser {
 	parser := flags.NewParser(kapcom, flags.Default)
 	parser.NamespaceDelimiter = "-"
@@ -185,9 +194,9 @@ func AddConfiguration(options *CommandLineOptionsGroup) {
 
 func onoff(description string, f func() bool) {
 	if f() {
-		fmt.Printf("%s: ON\n", description)
+		Log.Info(fmt.Sprintf("%s: ON", description))
 	} else {
-		fmt.Printf("%s: OFF\n", description)
+		Log.Info(fmt.Sprintf("%s: OFF", description))
 	}
 }
 func Info() {
@@ -198,10 +207,11 @@ func Info() {
 	onoff("Writing CRD status", WriteCRDStatus)
 	onoff("Adobe Envoy extensions", AdobeEnvoyExtensions)
 	onoff("CRD migration", EnableCRDMigration)
-	fmt.Println("K8s resync interval:", K8sResyncInterval())
-	fmt.Println("Pod IP:", PodIP())
-	fmt.Println("Host IP:", HostIP())
-	fmt.Println("=============")
+	onoff("ext_authz rewrites", ExtAuthzRewrites)
+	Log.Info(fmt.Sprintf("K8s resync interval: %s", K8sResyncInterval()))
+	Log.Info(fmt.Sprintf("Pod IP: %s", PodIP()))
+	Log.Info(fmt.Sprintf("Host IP: %s", HostIP()))
+	Log.Info("=============")
 }
 
 // Config - config sotw
@@ -225,6 +235,22 @@ func GrpcTracing() bool {
 
 func GrpcAlsEnabled() bool {
 	return bool(kapcom.Grpc.ALS.Enabled)
+}
+
+func GrpcAlsGlobalHost() string {
+	return kapcom.Grpc.ALS.Global.Host
+}
+
+func GrpcAlsGlobalPort() uint16 {
+	return kapcom.Grpc.ALS.Global.Port
+}
+
+func GrpcAlsGlobalHeaderMatch() string {
+	return kapcom.Grpc.ALS.Global.HeaderMatch
+}
+
+func GrpcAlsGlobalMetadataMatch() string {
+	return kapcom.Grpc.ALS.Global.MetadataMatch
 }
 
 func DebugLogs() bool {
@@ -307,6 +333,14 @@ func SecretRotationInterval() time.Duration {
 	return kapcom.SecretRotationInterval
 }
 
+func ExtAuthzRewrites() bool {
+	return bool(kapcom.ExtAuthz.Rewrites)
+}
+
+func UpstreamTrustedCertsPath() string {
+	return kapcom.UpstreamTrustedCerts
+}
+
 func XDSPort() int {
 	return kapcom.XDS.Port
 }
@@ -321,6 +355,10 @@ func XDSBacklog() int {
 
 func EnableCRDMigration() bool {
 	return bool(kapcom.EnableCRDMigration)
+}
+
+func DefaultLbPolicy() string {
+	return kapcom.Envoy.DefaultLbPolicy
 }
 
 func EnvoyZoneAwareRouting() bool {

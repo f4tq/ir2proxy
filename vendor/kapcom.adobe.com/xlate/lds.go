@@ -12,7 +12,6 @@ import (
 	"kapcom.adobe.com/config"
 	"kapcom.adobe.com/constants"
 	"kapcom.adobe.com/constants/annotations"
-	crds "kapcom.adobe.com/crds/v1"
 	"kapcom.adobe.com/set"
 	"kapcom.adobe.com/util"
 	"kapcom.adobe.com/xds"
@@ -21,24 +20,26 @@ import (
 	accesslog "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	trace "github.com/envoyproxy/go-control-plane/envoy/config/trace/v3"
 	file_log "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
 	grpc_log "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/grpc/v3"
-	ext_authz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	header_to_metadata "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
 	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	tls_inspector "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcp_proxy "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	matcher "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	envoy_type "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/golang/protobuf/ptypes/duration"
-	_struct "github.com/golang/protobuf/ptypes/struct"
 	"github.com/golang/protobuf/ptypes/wrappers"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 	"gopkg.in/inconshreveable/log15.v2"
 	k8s "k8s.io/api/core/v1"
 )
@@ -69,11 +70,11 @@ const (
 	optGWAuthz
 	optCORS
 	optGRPCALS
+	optDynFwd
 )
 
-var (
-	optAll = optHeaderSize | optIPAllowDeny | optHealthCheck
-)
+// optAll is the list of default options
+var optAll = optHeaderSize | optIPAllowDeny | optHealthCheck
 
 // Envoy doesn't accept 0 which means the object's default kicks in
 func validPercent(f float64) bool {
@@ -112,6 +113,9 @@ func getHCMOpts(ingress *Ingress) (opts hcmOpts) {
 			}
 			if pfc.Authz != nil {
 				opts |= optGWAuthz
+			}
+			if pfc.DynamicForwardProxy != nil {
+				opts |= optDynFwd
 			}
 		}
 		if len(route.RateLimits) > 0 {
@@ -164,8 +168,32 @@ func sniEqual(fc1, fc2 *listener.FilterChain) (answer bool) {
 	return
 }
 
+// check if some SNIs in fc1 are missing from fc2
+func sniAbsent(fc1, fc2 *listener.FilterChain) (answer bool) {
+	if fc1 == nil || fc1.FilterChainMatch == nil ||
+		fc2 == nil || fc2.FilterChainMatch == nil {
+		return
+	}
+
+	for _, sni1 := range fc1.FilterChainMatch.ServerNames {
+		foundSNI := false
+		for _, sni2 := range fc2.FilterChainMatch.ServerNames {
+			if sni1 == sni2 {
+				foundSNI = true
+				break
+			}
+		}
+		if !foundSNI {
+			answer = true
+			return
+		}
+	}
+
+	return
+}
+
 func jsonAccessLog(log log15.Logger, http bool) *accesslog.AccessLog {
-	var logFields map[string]*_struct.Value
+	var logFields map[string]*structpb.Value
 	if http {
 		logFields = logFieldsHTTP
 	} else {
@@ -180,7 +208,7 @@ func jsonAccessLog(log log15.Logger, http bool) *accesslog.AccessLog {
 				AccessLogFormat: &file_log.FileAccessLog_LogFormat{
 					LogFormat: &core.SubstitutionFormatString{
 						Format: &core.SubstitutionFormatString_JsonFormat{
-							JsonFormat: &_struct.Struct{
+							JsonFormat: &structpb.Struct{
 								Fields: logFields,
 							},
 						},
@@ -191,33 +219,28 @@ func jsonAccessLog(log log15.Logger, http bool) *accesslog.AccessLog {
 	}
 }
 
-//mExtAuthz - is sidecar only authz
-func mExtAuthz(eaz *crds.ExtAuthz) hcmMutator {
-	return func(log log15.Logger, hcmConfig *hcm.HttpConnectionManager) {
-		if eaz == nil {
-			return
-		}
-
-		eazFilter := &hcm.HttpFilter{
-			Name: wellknown.HTTPExternalAuthorization,
-			ConfigType: &hcm.HttpFilter_TypedConfig{
-				TypedConfig: util.ToAny(log, &ext_authz.ExtAuthz{
-					Services: &ext_authz.ExtAuthz_GrpcService{
-						GrpcService: &core.GrpcService{
-							TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
-								EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
-									ClusterName: constants.ExtAuthzCluster,
-								},
+func grpcAccessLog(log log15.Logger, logName string, grpcLogger *GRPCLogger) *accesslog.AccessLog {
+	return &accesslog.AccessLog{
+		Name: wellknown.HTTPGRPCAccessLog,
+		ConfigType: &accesslog.AccessLog_TypedConfig{
+			TypedConfig: util.ToAny(log, &grpc_log.HttpGrpcAccessLogConfig{
+				CommonConfig: &grpc_log.CommonGrpcAccessLogConfig{
+					TransportApiVersion: constants.DefaultApiVersion,
+					LogName:             logName,
+					GrpcService: &core.GrpcService{
+						TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+							EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
+								ClusterName: GRPCClusterName(grpcLogger),
 							},
 						},
+						Timeout: ptypes.DurationProto(time.Second),
 					},
-					FailureModeAllow:    eaz.FailureModeAllow,
-					TransportApiVersion: core.ApiVersion_V3,
-				}),
-			},
-		}
-
-		hcmConfig.HttpFilters = append(hcmConfig.HttpFilters, eazFilter)
+					GrpcStreamRetryPolicy: &core.RetryPolicy{
+						NumRetries: &wrappers.UInt32Value{Value: 3},
+					},
+				},
+			}),
+		},
 	}
 }
 
@@ -239,37 +262,68 @@ func mStreamIdleTimeout(ic IngressClass) hcmMutator {
 
 func mGRPCALS(ingress *Ingress) hcmMutator {
 	return func(log log15.Logger, hcmConfig *hcm.HttpConnectionManager) {
-		if len(ingress.VirtualHost.Logging.Loggers) == 0 {
+		if !config.GrpcAlsEnabled() {
 			return
 		}
 
-		grpcLogger := ingress.VirtualHost.Logging.Loggers[0].GRPC
-		if grpcLogger == nil {
-			return
+		if len(ingress.VirtualHost.Logging.Loggers) != 0 {
+			if grpcLogger := ingress.VirtualHost.Logging.Loggers[0].GRPC; grpcLogger != nil {
+				al := grpcAccessLog(log, ingress.Fqdn, grpcLogger)
+				hcmConfig.AccessLog = append(hcmConfig.AccessLog, al)
+			}
 		}
 
-		grpcALS := &accesslog.AccessLog{
-			Name: wellknown.HTTPGRPCAccessLog,
-			ConfigType: &accesslog.AccessLog_TypedConfig{
-				TypedConfig: util.ToAny(log, &grpc_log.HttpGrpcAccessLogConfig{
-					CommonConfig: &grpc_log.CommonGrpcAccessLogConfig{
-						TransportApiVersion: core.ApiVersion_V3,
-						LogName:             ingress.Fqdn,
-						GrpcService: &core.GrpcService{
-							TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
-								EnvoyGrpc: &core.GrpcService_EnvoyGrpc{
-									ClusterName: GRPCClusterName(grpcLogger),
+		if config.GrpcAlsGlobalHost() != "" && config.GrpcAlsGlobalPort() > 0 {
+			grpcLogger := &GRPCLogger{
+				Host: config.GrpcAlsGlobalHost(),
+				Port: config.GrpcAlsGlobalPort(),
+			}
+
+			al := grpcAccessLog(log, "global gRPC access logger", grpcLogger)
+			al.Filter = &accesslog.AccessLogFilter{
+				FilterSpecifier: &accesslog.AccessLogFilter_OrFilter{
+					OrFilter: &accesslog.OrFilter{
+						Filters: []*accesslog.AccessLogFilter{
+							{
+								FilterSpecifier: &accesslog.AccessLogFilter_HeaderFilter{
+									HeaderFilter: &accesslog.HeaderFilter{
+										Header: &route.HeaderMatcher{
+											Name: config.GrpcAlsGlobalHeaderMatch(),
+											HeaderMatchSpecifier: &route.HeaderMatcher_PresentMatch{
+												PresentMatch: true,
+											},
+										},
+									},
 								},
 							},
-							Timeout: ptypes.DurationProto(time.Second),
+							{
+								FilterSpecifier: &accesslog.AccessLogFilter_MetadataFilter{
+									MetadataFilter: &accesslog.MetadataFilter{
+										Matcher: &matcher.MetadataMatcher{
+											Filter: wellknown.HTTPExternalAuthorization,
+											Path: []*matcher.MetadataMatcher_PathSegment{
+												{
+													Segment: &matcher.MetadataMatcher_PathSegment_Key{
+														Key: config.GrpcAlsGlobalMetadataMatch(),
+													},
+												},
+											},
+											Value: &matcher.ValueMatcher{
+												MatchPattern: &matcher.ValueMatcher_PresentMatch{
+													PresentMatch: true,
+												},
+											},
+										},
+										MatchIfKeyNotFound: wrapperspb.Bool(false),
+									},
+								},
+							},
 						},
-						// TODO(bcook)
-						// GrpcStreamRetryPolicy
 					},
-				}),
-			},
+				},
+			}
+			hcmConfig.AccessLog = append(hcmConfig.AccessLog, al)
 		}
-		hcmConfig.AccessLog = append(hcmConfig.AccessLog, grpcALS)
 	}
 }
 
@@ -299,73 +353,19 @@ func mTracing(lc *ListenerConfig, class string) hcmMutator {
 			hcmT.Verbose = *cfg.Verbose
 		}
 
-		sv := func(value string) *_struct.Value {
-			return &_struct.Value{
-				Kind: &_struct.Value_StringValue{value},
-			}
-		}
-		nv := func(value float64) *_struct.Value {
-			return &_struct.Value{
-				Kind: &_struct.Value_NumberValue{value},
-			}
-		}
-		bv := func(value bool) *_struct.Value {
-			return &_struct.Value{
-				Kind: &_struct.Value_BoolValue{value},
-			}
-		}
-
-		// TODO(bcook) make more of this configurable
 		hcmT.Provider = &trace.Tracing_Http{
-			Name: "envoy.dynamic.ot",
+			Name: "envoy.tracers.opentelemetry",
 			ConfigType: &trace.Tracing_Http_TypedConfig{
-				TypedConfig: util.ToAny(log, &trace.DynamicOtConfig{
-					Library: cfg.LibraryPath,
-					Config: &_struct.Struct{
-						Fields: map[string]*_struct.Value{
-							"service_name":       sv(cfg.ServiceName),
-							"propagation_format": sv(cfg.PropagationFormat),
-							"sampler": {
-								Kind: &_struct.Value_StructValue{
-									StructValue: &_struct.Struct{
-										Fields: map[string]*_struct.Value{
-											"type":  sv("const"), // Sampling happens at the otel collector
-											"param": nv(1),
-										},
-									},
-								},
-							},
-							"reporter": {
-								Kind: &_struct.Value_StructValue{
-									StructValue: &_struct.Struct{
-										Fields: map[string]*_struct.Value{
-											"localAgentHostPort": sv("127.0.0.1:6831"),
-										},
-									},
-								},
-							},
-							"headers": {
-								Kind: &_struct.Value_StructValue{
-									StructValue: &_struct.Struct{
-										Fields: map[string]*_struct.Value{
-											"jaegerDebugHeader":        sv("jaeger-debug-id"),
-											"jaegerBaggageHeader":      sv("jaeger-baggage"),
-											"traceBaggageHeaderPrefix": sv("uberctx-"),
-										},
-									},
-								},
-							},
-							"baggage_restrictions": {
-								Kind: &_struct.Value_StructValue{
-									StructValue: &_struct.Struct{
-										Fields: map[string]*_struct.Value{
-											"denyBaggageOnInitializationFailure": bv(false),
-											"hostPort":                           sv(""),
-										},
-									},
-								},
+				TypedConfig: util.ToAny(log, &trace.OpenTelemetryConfig{
+					ServiceName: cfg.ServiceName,
+					GrpcService: &core.GrpcService{
+						TargetSpecifier: &core.GrpcService_GoogleGrpc_{
+							GoogleGrpc: &core.GrpcService_GoogleGrpc{
+								TargetUri:  cfg.TargetUri,
+								StatPrefix: cfg.ServiceName + "-otel",
 							},
 						},
+						Timeout: ptypes.DurationProto(time.Second),
 					},
 				}),
 			},
@@ -375,7 +375,6 @@ func mTracing(lc *ListenerConfig, class string) hcmMutator {
 
 func mMiscFilters(opts hcmOpts, ingresses ...*Ingress) hcmMutator {
 	return func(log log15.Logger, hcmConfig *hcm.HttpConnectionManager) {
-
 		httpFilters := []*hcm.HttpFilter{}
 
 		if config.AdobeEnvoyExtensions() {
@@ -384,7 +383,7 @@ func mMiscFilters(opts hcmOpts, ingresses ...*Ingress) hcmMutator {
 					Name: "envoy.filters.http.ip_allow_deny",
 					ConfigType: &hcm.HttpFilter_TypedConfig{
 						TypedConfig: util.ToAny(log, &udpa_type.TypedStruct{
-							TypeUrl: "envoy.config.filter.network.ip_allow_deny.v2.IpAllowDeny",
+							TypeUrl: "envoy.config.filter.http.ip_allow_deny.v3.IpAllowDeny",
 						}),
 					},
 				})
@@ -395,10 +394,10 @@ func mMiscFilters(opts hcmOpts, ingresses ...*Ingress) hcmMutator {
 					Name: constants.HealthCheckSimpleFilter,
 					ConfigType: &hcm.HttpFilter_TypedConfig{
 						TypedConfig: util.ToAny(log, &udpa_type.TypedStruct{
-							TypeUrl: "envoy.config.filter.http.health_check_simple.v2.HealthCheckSimple",
-							Value: &_struct.Struct{
-								Fields: map[string]*_struct.Value{
-									"path": {Kind: &_struct.Value_StringValue{"/envoy_health_94eaa5a6ba44fc17d1da432d4a1e2d73"}},
+							TypeUrl: "envoy.config.filter.http.health_check_simple.v3.HealthCheckSimple",
+							Value: &structpb.Struct{
+								Fields: map[string]*structpb.Value{
+									"path": {Kind: &structpb.Value_StringValue{"/envoy_health_94eaa5a6ba44fc17d1da432d4a1e2d73"}},
 								},
 							},
 						}),
@@ -411,11 +410,27 @@ func mMiscFilters(opts hcmOpts, ingresses ...*Ingress) hcmMutator {
 					Name: constants.HeaderSizeFilter,
 					ConfigType: &hcm.HttpFilter_TypedConfig{
 						TypedConfig: util.ToAny(log, &udpa_type.TypedStruct{
-							TypeUrl: "envoy.config.filter.http.header_size.v2.HeaderSize",
-							Value: &_struct.Struct{
-								Fields: map[string]*_struct.Value{
+							TypeUrl: "envoy.config.filter.http.header_size.v3.HeaderSize",
+							Value: &structpb.Struct{
+								Fields: map[string]*structpb.Value{
 									// https://github.com/phylake/envoy/commit/70e6900f46273472bf3932421b01691551df8362
-									"max_bytes": {Kind: &_struct.Value_NumberValue{64 * 1024}},
+									"max_bytes": {Kind: &structpb.Value_NumberValue{64 * 1024}},
+								},
+							},
+						}),
+					},
+				})
+			}
+
+			if opts&optDynFwd > 0 {
+				httpFilters = append(httpFilters, &hcm.HttpFilter{
+					Name: constants.DynFwdProxyFilter,
+					ConfigType: &hcm.HttpFilter_TypedConfig{
+						TypedConfig: util.ToAny(log, &udpa_type.TypedStruct{
+							Value: &structpb.Struct{
+								Fields: map[string]*structpb.Value{
+									"name":              {Kind: &structpb.Value_StringValue{"dynamic_forward_proxy_cache_config"}},
+									"dns_lookup_family": {Kind: &structpb.Value_StringValue{"V4_ONLY"}},
 								},
 							},
 						}),
@@ -439,20 +454,25 @@ func mMiscFilters(opts hcmOpts, ingresses ...*Ingress) hcmMutator {
 		}
 
 		if opts&optGWAuthz > 0 {
-			filter := AuthzHcmFilter()
+			filter := AuthzHcmFilterDefault()
 			if filter == nil {
 				log.Error("authz filter requested but not configured")
 			} else {
-				a, err := anypb.New(proto.MessageV2(AuthzHcmFilter()))
-				if err != nil {
-					log.Error("Can't convert Authz filter")
-				} else {
-					httpFilters = append(httpFilters, &hcm.HttpFilter{
-						Name: wellknown.HTTPExternalAuthorization,
-						ConfigType: &hcm.HttpFilter_TypedConfig{
-							TypedConfig: a,
-						},
-					})
+				// ExtAuthz needs context (ingress)
+				// add authz to the chain.
+				// in practice, ingress is an optional argument
+				for _, ingress := range ingresses {
+					a, err := anypb.New(proto.MessageV2(AuthzHcmFilter(ingress)))
+					if err != nil {
+						log.Error("Can't convert Authz filter")
+					} else {
+						httpFilters = append(httpFilters, &hcm.HttpFilter{
+							Name: wellknown.HTTPExternalAuthorization,
+							ConfigType: &hcm.HttpFilter_TypedConfig{
+								TypedConfig: a,
+							},
+						})
+					}
 				}
 			}
 		}
@@ -466,7 +486,6 @@ func mMiscFilters(opts hcmOpts, ingresses ...*Ingress) hcmMutator {
 				anyb, err := anypb.New(proto.MessageV2(RateLimitHcmFilter(ingress)))
 				if err != nil {
 					config.Log.Error("RateLimitHcmFilter encoding error", "Error", err)
-
 				} else {
 					httpFilters = append(httpFilters, &hcm.HttpFilter{
 						Name: wellknown.HTTPRateLimit,
@@ -483,8 +502,8 @@ func mMiscFilters(opts hcmOpts, ingresses ...*Ingress) hcmMutator {
 }
 
 func hcmFilter(log log15.Logger, listenerName string,
-	mutators ...hcmMutator) *listener.Filter {
-
+	mutators ...hcmMutator,
+) *listener.Filter {
 	hcmConfig := &hcm.HttpConnectionManager{
 		StatPrefix: listenerName,
 		ServerName: constants.ServerHeader,
@@ -524,6 +543,17 @@ func hcmFilter(log log15.Logger, listenerName string,
 	}
 	hcmConfig.HttpFilters = append([]*hcm.HttpFilter{htmf}, hcmConfig.HttpFilters...)
 
+	// add dynamic forward proxy filters if needed at the end
+	extAuthz := false
+	for _, filter := range hcmConfig.HttpFilters {
+		if filter.Name == wellknown.HTTPExternalAuthorization {
+			extAuthz = true
+		}
+	}
+	if extAuthz {
+		hcmConfig.HttpFilters = append(hcmConfig.HttpFilters, GetAuthzRewriteHTTPFilters(log)...)
+	}
+
 	// router is always last
 	routerFilter := &hcm.HttpFilter{
 		Name: wellknown.Router,
@@ -544,8 +574,8 @@ func hcmFilter(log log15.Logger, listenerName string,
 }
 
 func tcpProxyFilter(log log15.Logger, nsCRDs namespaceCRDs,
-	ingress *Ingress, listenerName, statPrefix string) *listener.Filter {
-
+	ingress *Ingress, listenerName, statPrefix string,
+) *listener.Filter {
 	clusterWeights := make([]*tcp_proxy.TcpProxy_WeightedCluster_ClusterWeight, 0)
 	var totalWeight uint32
 
@@ -626,8 +656,8 @@ func tcpProxyFilter(log log15.Logger, nsCRDs namespaceCRDs,
 
 func downstreamTlsContext(tlsMin, tlsMax tls.TlsParameters_TlsProtocol,
 	customCiphers []string, secretName string, alpns []string,
-	mtls *mTLS) *tls.DownstreamTlsContext {
-
+	mtls *mTLS,
+) *tls.DownstreamTlsContext {
 	cipherSuites := customCiphers
 	if len(cipherSuites) == 0 {
 		cipherSuites = ciphers.DefaultCipherSuites()
@@ -676,8 +706,8 @@ func downstreamTlsContext(tlsMin, tlsMax tls.TlsParameters_TlsProtocol,
 }
 
 func transportSocket(log log15.Logger,
-	DTC *tls.DownstreamTlsContext) *core.TransportSocket {
-
+	DTC *tls.DownstreamTlsContext,
+) *core.TransportSocket {
 	return &core.TransportSocket{
 		Name: wellknown.TransportSocketTls,
 		ConfigType: &core.TransportSocket_TypedConfig{
@@ -798,12 +828,17 @@ func getDownstreamTLSContext(log log15.Logger, fc *listener.FilterChain) *tls.Do
 	return nil
 }
 
-func (recv *CRDHandler) canBundle(i1, i2 *Ingress) (answer bool) {
+func (recv *CRDHandler) canBundle(i1, i2 *Ingress, isUpdate bool) (answer bool) {
 	if i1 == nil || i2 == nil {
 		return
 	}
 
+	log := recv.log.New("ns", i1.Namespace, "name", i1.Name)
+
 	if i1.Class != i2.Class {
+		if isUpdate {
+			log.Warn("canBundle", "new", i1.Class, "old", i2.Class)
+		}
 		return
 	}
 
@@ -812,18 +847,42 @@ func (recv *CRDHandler) canBundle(i1, i2 *Ingress) (answer bool) {
 
 	// rate limit filter has ingress-specific config and can't be bundled with
 	// anything else
-	if (opt1&optRateLimit) > 0 || (opt2&optRateLimit) > 0 {
-		return
+	if isUpdate {
+		if opt1&optRateLimit != opt2&optRateLimit {
+			log.Warn("canBundle", "new", (opt1&optRateLimit) > 0, "old", (opt2&optRateLimit) > 0)
+			return
+		}
+	} else {
+		if (opt1&optRateLimit) > 0 || (opt2&optRateLimit) > 0 {
+			return
+		}
+	}
+
+	// additional unique access logger on the HTTPConnectionManager
+	if isUpdate {
+		if opt1&optGRPCALS != opt2&optGRPCALS {
+			log.Warn("canBundle", "new", (opt1&optGRPCALS) > 0, "old", (opt2&optGRPCALS) > 0)
+			return
+		}
+	} else {
+		if (opt1&optGRPCALS) > 0 || (opt2&optGRPCALS) > 0 {
+			return
+		}
 	}
 
 	// nothing special about ext_authz except that we don't want to expose other
 	// services to potential RVS stability/performance issues
 	if opt1&optGWAuthz != opt2&optGWAuthz {
+		if isUpdate {
+			log.Warn("canBundle", "new", opt1&optGWAuthz, "old", opt2&optGWAuthz)
+		}
 		return
 	}
 
-	// additional unique access logger on the HTTPConnectionManager
-	if (opt1&optGRPCALS) > 0 || (opt2&optGRPCALS) > 0 {
+	if opt1&optDynFwd != opt2&optDynFwd {
+		if isUpdate {
+			log.Warn("canBundle", "new", opt1&optDynFwd, "old", opt2&optDynFwd)
+		}
 		return
 	}
 
@@ -835,34 +894,55 @@ func (recv *CRDHandler) canBundle(i1, i2 *Ingress) (answer bool) {
 	}
 
 	if l1.TLS.SecretName != l2.TLS.SecretName {
+		if isUpdate {
+			log.Warn("canBundle", "new", l1.TLS.SecretName, "old", l2.TLS.SecretName)
+		}
 		return
 	}
 
 	if l1.TLS.MinProtocolVersion != l2.TLS.MinProtocolVersion {
+		if isUpdate {
+			log.Warn("canBundle", "new", l1.TLS.MinProtocolVersion, "old", l2.TLS.MinProtocolVersion)
+		}
 		return
 	}
 
 	if l1.TLS.MaxProtocolVersion != l2.TLS.MaxProtocolVersion {
+		if isUpdate {
+			log.Warn("canBundle", "new", l1.TLS.MaxProtocolVersion, "old", l2.TLS.MaxProtocolVersion)
+		}
 		return
 	}
 
 	if !util.SoSEqual(l1.TLS.CipherSuites, l2.TLS.CipherSuites) {
+		if isUpdate {
+			log.Warn("canBundle", "new", l1.TLS.CipherSuites, "old", l2.TLS.CipherSuites)
+		}
 		return
 	}
 
 	if l1.TLS.Passthrough != l2.TLS.Passthrough {
+		if isUpdate {
+			log.Warn("canBundle", "new", l1.TLS.Passthrough, "old", l2.TLS.Passthrough)
+		}
 		return
 	}
 
 	// while the transport socket may be identical, the filter is different
 	if (l1.TCPProxy == nil && l2.TCPProxy != nil) ||
 		(l1.TCPProxy != nil && l2.TCPProxy == nil) {
+		if isUpdate {
+			log.Warn("canBundle", "new", l1.TCPProxy == nil, "old", l2.TCPProxy == nil)
+		}
 		return
 	}
 
 	// while the transport socket may be identical, the filter is different
 	if (i1.VirtualHost.Routes == nil && i2.VirtualHost.Routes != nil) ||
 		(i1.VirtualHost.Routes != nil && i2.VirtualHost.Routes == nil) {
+		if isUpdate {
+			log.Warn("canBundle", "new", i1.VirtualHost.Routes == nil, "old", i2.VirtualHost.Routes == nil)
+		}
 		return
 	}
 
@@ -871,6 +951,9 @@ func (recv *CRDHandler) canBundle(i1, i2 *Ingress) (answer bool) {
 	mtls2 := recv.mTLSForIngress(i2)
 	if (mtls1 == nil && mtls2 != nil) ||
 		(mtls1 != nil && mtls2 == nil) {
+		if isUpdate {
+			log.Warn("canBundle", "new", mtls1 == nil, "old", mtls2 == nil)
+		}
 		return
 	}
 
@@ -917,7 +1000,7 @@ func (recv *CRDHandler) getGatewayListeners(sotw SotW, ingressClass string) []xd
 			}
 
 			if portInfo.SockOpts.SO_REUSEPORT != nil {
-				l.ReusePort = *portInfo.SockOpts.SO_REUSEPORT
+				l.EnableReusePort = wrapperspb.Bool(*portInfo.SockOpts.SO_REUSEPORT)
 			}
 
 			lmeta := &listenerMeta{
@@ -985,7 +1068,6 @@ func (recv *CRDHandler) getGatewayListeners(sotw SotW, ingressClass string) []xd
 }
 
 func (recv *CRDHandler) removeFilterChainMatch(ingress *Ingress) {
-
 	if ingress.Fqdn == "" {
 		return
 	}
@@ -1046,8 +1128,8 @@ func (recv *CRDHandler) removeFilterChainMatch(ingress *Ingress) {
 }
 
 func (recv *CRDHandler) ingressToFilterChain(ingress *Ingress,
-	listenerName string) (fc *listener.FilterChain) {
-
+	listenerName string,
+) (fc *listener.FilterChain) {
 	fc = &listener.FilterChain{
 		Filters: []*listener.Filter{},
 	}
@@ -1060,7 +1142,7 @@ func (recv *CRDHandler) ingressToFilterChain(ingress *Ingress,
 			if ingress2.Valid() &&
 				!ingress2.Analogous(ingress) &&
 				recv.isHighestPriorityIngress(ingress2) &&
-				(ingress == ingress2 || recv.canBundle(ingress, ingress2)) {
+				(ingress == ingress2 || recv.canBundle(ingress, ingress2, false)) {
 				serverNames = append(serverNames, ingress2.Fqdn)
 				opts |= getHCMOpts(ingress2)
 			}
@@ -1105,7 +1187,7 @@ func (recv *CRDHandler) ingressToFilterChain(ingress *Ingress,
 		}
 	}
 
-	if !tlsPassthrough(ingress) {
+	if !tlsPassthrough(ingress) && ingress.Listener.TLS.SecretName != "" {
 		dtc := downstreamTlsContext(
 			ingress.Listener.TLS.MinProtocolVersion,
 			ingress.Listener.TLS.MaxProtocolVersion,
@@ -1139,7 +1221,7 @@ func (recv *CRDHandler) updateGatewayLDS(sotw SotW, ingress, ingressOld *Ingress
 		return
 	}
 
-	if ingressOld != nil && !recv.canBundle(ingress, ingressOld) {
+	if ingressOld != nil && !recv.canBundle(ingress, ingressOld, true) {
 		recv.removeFilterChainMatch(ingressOld)
 	}
 
@@ -1189,6 +1271,26 @@ func (recv *CRDHandler) updateGatewayLDS(sotw SotW, ingress, ingressOld *Ingress
 							len(l.FilterChains), "fqdn", ingress.Fqdn, "fcNew", string(fcNewJson))
 					}
 
+					// it's possible that a previously bundled SNI is now bundled differently
+					// overriding (and possibly removing) the SNIs it is bundled with
+					// treat is as an addition here; the old one will be removed later when checking for dups
+					if foundFC && !sniEqual(fc, fcNew) && sniAbsent(fc, fcNew) {
+						for i, sn := range fc.FilterChainMatch.ServerNames {
+							if sn == ingress.Fqdn {
+								recv.log.Info("unbundle SNI from FilterChain",
+									"listener", l.Name, "fqdn", ingress.Fqdn,
+									"ns", ingress.Namespace, "name", ingress.Name,
+								)
+								sns := fc.FilterChainMatch.ServerNames
+								sns = append(sns[:i], sns[i+1:]...)
+								fc.FilterChainMatch.ServerNames = sns
+								// treat as if we didn't find it so it can be appended below
+								foundFC = false
+								break
+							}
+						}
+					}
+
 					if foundFC {
 						// for TCPProxy assume the cluster name has changed
 						// until we have a better way to detect that it has
@@ -1202,6 +1304,45 @@ func (recv *CRDHandler) updateGatewayLDS(sotw SotW, ingress, ingressOld *Ingress
 							return l.FilterChains[i].FilterChainMatch.ServerNames[0] < l.FilterChains[j].FilterChainMatch.ServerNames[0]
 						})
 						protoChanged = true
+					}
+
+					// Ensure there are no duplicate filter chains with overlapping server_names matching rules
+					foundFC = false
+					for fci, fc = range l.FilterChains {
+						if fc.FilterChainMatch == nil {
+							continue
+						}
+
+						if sniIntersects(fc, fcNew) && !sniEqual(fc, fcNew) && fc != lmeta.defaultFC {
+
+							// we found it: remove it
+							var newServerNames []string
+							for _, sn := range fc.FilterChainMatch.ServerNames {
+								found := false
+								for _, snNew := range fcNew.FilterChainMatch.ServerNames {
+									if sn == snNew {
+										recv.log.Info("unbundling duplicate SNI from FilterChain",
+											"listener", l.Name, "fqdn", snNew,
+										)
+										found = true
+										foundFC = true
+										break
+									}
+								}
+								if !found {
+									newServerNames = append(newServerNames, sn)
+								}
+							}
+							fc.FilterChainMatch.ServerNames = newServerNames
+
+							if foundFC && len(fc.FilterChainMatch.ServerNames) == 0 {
+								recv.log.Info("cleaned up FilterChain with empty server_names", "listener", l.Name)
+								fcs := l.FilterChains
+								fcs = append(fcs[:fci], fcs[fci+1:]...)
+								l.FilterChains = fcs
+							}
+							break
+						}
 					}
 
 					if protoChanged && config.DebugLogs() {
@@ -1297,9 +1438,7 @@ func (recv *CRDHandler) updateSidecarLDS(sotw SotW, ingress *Ingress) {
 				filter = hcmFilter(recv.log, listenerName,
 					mStatPrefix(statPrefix),
 					mMiscFilters(optHealthCheck),
-					mExtAuthz(sotw.sidecar.Spec.Filters.ExtAuthz),
 					mTracing(recv.lc, ingress.Class),
-					mGRPCALS(ingress),
 				)
 			}
 

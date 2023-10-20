@@ -11,6 +11,7 @@ import (
 	"kapcom.adobe.com/xlate"
 
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	"github.com/google/uuid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 )
@@ -59,15 +60,15 @@ func serviceToCluster(service *Service) xlate.Cluster {
 
 	switch service.Strategy {
 	case "WeightedLeastRequest":
-		c.LbPolicy = cluster.Cluster_LEAST_REQUEST
+		c.LbPolicy = cluster.Cluster_LEAST_REQUEST.Enum()
 	case "Random":
-		c.LbPolicy = cluster.Cluster_RANDOM
+		c.LbPolicy = cluster.Cluster_RANDOM.Enum()
 	case "RingHash":
-		c.LbPolicy = cluster.Cluster_RING_HASH
+		c.LbPolicy = cluster.Cluster_RING_HASH.Enum()
 	case "Maglev":
-		c.LbPolicy = cluster.Cluster_MAGLEV
-	default: // includes explicit RoundRobin
-		c.LbPolicy = cluster.Cluster_ROUND_ROBIN
+		c.LbPolicy = cluster.Cluster_MAGLEV.Enum()
+	case "RoundRobin":
+		c.LbPolicy = cluster.Cluster_ROUND_ROBIN.Enum()
 	}
 
 	if service.IdleTimeout != nil {
@@ -158,6 +159,13 @@ func (recv *IRHandler) CRDToIngress(crd *IngressRoute) *xlate.Ingress {
 			priority, err := strconv.ParseInt(priorityAnnot, 10, 0)
 			if err == nil {
 				ingress.Priority = int(priority)
+			}
+		}
+		if migrationID := crd.Annotations[annotations.MigrationID]; migrationID != "" {
+			var err error
+			ingress.MigrationID, err = uuid.Parse(migrationID)
+			if err != nil {
+				ingress.CRDError = "Invalid " + annotations.MigrationID + " annotation: " + migrationID
 			}
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	authz_http "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
+	"github.com/golang/protobuf/ptypes"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -114,7 +115,7 @@ func (flags *AuthzFlags) Validate(cfg *config.KapcomConfig) error {
 	}
 	//rr := &authz_http.ExtAuthz{}
 	rr := &envoy_api.HttpExtAuthz{}
-	err = protojson.Unmarshal(bb, &rr.ExtAuthz)
+	err = rr.UnmarshalJSON(bb)
 	if err != nil {
 		return fmt.Errorf("authz filter from file error %s", err.Error())
 	}
@@ -225,7 +226,7 @@ func (recv *extAuth2Converter) String() string { return recv.Type() }
 // Unmarshal -- read a protojson rep of proto authz.ExtAuthz
 func (recv *extAuth2Converter) Unmarshal(bb []byte) (interface{}, error) {
 	xx := envoy_api.NewAuthz()
-	err := protojson.Unmarshal(bb, xx)
+	err := xx.UnmarshalJSON(bb)
 	if err != nil {
 		return nil, err
 	}
@@ -279,8 +280,8 @@ func (recv *extAuth2Converter) Compare(a interface{}, b interface{}) error {
 	return nil
 }
 
-// AuthzHcmFilter -- convert the flags settings into the protobuf atelimit_v3.RateLimit struct needed by envoy
-func AuthzHcmFilter() *envoy_api.HttpExtAuthz {
+// AuthzHcmFilterDefault -- convert the flags settings into the protobuf atelimit_v3.RateLimit struct needed by envoy
+func AuthzHcmFilterDefault() *envoy_api.HttpExtAuthz {
 	if AuthzEnabled() && authzFlags.filter != nil {
 		config.Log.Info(spew.Sprintf("AuthzHcmFilter requested %s", authzFlags.filter))
 		return authzFlags.filter
@@ -288,8 +289,49 @@ func AuthzHcmFilter() *envoy_api.HttpExtAuthz {
 	return nil
 }
 
+func AuthzHcmFilter(ingress *Ingress) *envoy_api.HttpExtAuthz {
+	if ingress == nil {
+		config.Log.Error("AuthzHcmFilter", "Error", "no ingress")
+		return nil
+	}
+	tmplt := AuthzHcmFilterDefault()
+	if tmplt == nil {
+		config.Log.Error("AuthzHcmFilter", "Error", "No extAuthz default set")
+		return nil
+	}
+	bs, err := protojson.Marshal(tmplt)
+	if err != nil {
+		config.Log.Error("AuthzHcmFilter marshal", "Error", err)
+		return nil
+	}
+	cp := &envoy_api.HttpExtAuthz{}
+	err = cp.UnmarshalJSON(bs)
+	if err != nil {
+		config.Log.Error("AuthzHcmFilter copy", "Error", err)
+		return nil
+	}
+	// Ingress-defined FailOpen/Timeout configuration
+	cp.FailureModeAllow = ingress.VirtualHost.Authorization.FailOpen
+	responseTimeout := ingress.VirtualHost.Authorization.ResponseTimeout
+	if responseTimeout != 0 {
+		switch {
+		case cp.GetGrpcService() != nil:
+			if svc := cp.GetGrpcService(); svc != nil {
+				svc.Timeout = ptypes.DurationProto(responseTimeout)
+			}
+		case cp.GetHttpService() != nil:
+			if svc := cp.GetHttpService(); svc != nil {
+				svc.ServerUri.Timeout = ptypes.DurationProto(responseTimeout)
+			}
+		}
+	}
+
+	return cp
+}
+
 // initAuthzCluster -- implementation of the authz envoy cluster taken from file --authz-cluster-file
-//    which transforms into a static envoy cluster
+//
+//	which transforms into a static envoy cluster
 func initAuthzCluster() (xds.Wrapper, error) {
 	if authzFlags.cluster != nil {
 		return xds.NewWrapper(authzFlags.cluster), nil
@@ -318,4 +360,113 @@ func RequiresAuthzFilter(ingress *Ingress) bool {
 		}
 	}
 	return false
+}
+
+// Ensure auth is configured on the delegator when a delegate requires it
+// this func can invalidate both the delegate and its parent
+func (recv *CRDHandler) checkAuth(ingress *Ingress) {
+	if !AuthzEnabled() {
+		return
+	}
+
+	// ignore delegate ingresses
+	if ingress.Fqdn != "" {
+		return
+	}
+
+	var authRoute *Route
+
+	for _, route := range ingress.VirtualHost.Routes {
+		if route.AuthEnabled() {
+			authRoute = route
+			break
+		}
+	}
+
+	if authRoute == nil {
+		// delegate doesn't have any routes with auth enabled: nothing to do
+		return
+	}
+
+	delegators := make(map[*Ingress]struct{})
+	recv.mapIngresses(func(ingress2 *Ingress) (stop bool) {
+		if ingress2 == ingress {
+			return
+		}
+		if ingress2.TypeURL != ingress.TypeURL {
+			return
+		}
+		if ingress2.Fqdn == "" {
+			return
+		}
+		for _, route := range ingress2.VirtualHost.Routes {
+			if route.Delegate == nil {
+				continue
+			}
+			// handle explicit and implicit namespace delegation
+			if route.Delegate.Name == ingress.Name &&
+				(route.Delegate.Namespace == ingress.Namespace || ingress.Namespace == ingress2.Namespace) {
+
+				delegators[ingress2] = struct{}{}
+				break
+			}
+		}
+		return
+	})
+
+	if len(delegators) == 0 {
+		recv.log.Warn("orphan delegate ingress with auth", "ns", ingress.Namespace, "name", ingress.Name)
+		return
+	}
+
+	for delegator := range delegators {
+		switch {
+		case delegator.Listener.TLS == nil:
+			recv.log.Warn("invalid delegator: TLS",
+				"delegate_ns", ingress.Namespace, "delegate_name", ingress.Name,
+				"delegator_ns", delegator.Namespace, "delegator_name", delegator.Name,
+			)
+			delegator.SetInvalid(fmt.Sprintf("cannot enable delegated route %s/%s authz on non tls listener",
+				ingress.Namespace, ingress.Name))
+			// track it as a failed delegation so an update will trigger the delegator to re-resolve
+			recv.getNS(ingress.Namespace).addFailedDelegation(
+				recv.log, ingress.Name,
+				recv.getNS(delegator.Namespace).getIngressPtr(delegator),
+			)
+
+		case delegator.VirtualHost.Authorization == nil:
+			recv.log.Warn("invalid delegator: AuthZ",
+				"delegate_ns", ingress.Namespace, "delegate_name", ingress.Name,
+				"delegator_ns", delegator.Namespace, "delegator_name", delegator.Name,
+			)
+			delegator.SetInvalid(fmt.Sprintf("delegated route %s/%s configures authz but %s/%svirtualhost does not",
+				ingress.Namespace, ingress.Name, delegator.Namespace, delegator.Name))
+			// track it as a failed delegation so an update will trigger the delegator to re-resolve
+			recv.getNS(ingress.Namespace).addFailedDelegation(
+				recv.log, ingress.Name,
+				recv.getNS(delegator.Namespace).getIngressPtr(delegator),
+			)
+		}
+	}
+}
+
+// Given a delegator and a delegate, ensure auth is configured properly
+func (recv *CRDHandler) delegateAuthValid(delegator, delegate *Ingress) (answer bool) {
+	answer = true
+
+	if !AuthzEnabled() {
+		return
+	}
+
+	if delegator.Listener.TLS != nil && delegator.VirtualHost.Authorization != nil {
+		return
+	}
+
+	for _, route := range delegate.VirtualHost.Routes {
+		if route.AuthEnabled() {
+			answer = false
+			break
+		}
+	}
+	return
 }

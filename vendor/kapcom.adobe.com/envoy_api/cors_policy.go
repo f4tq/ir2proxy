@@ -3,14 +3,14 @@ package envoy_api
 import (
 	"fmt"
 
-	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	cors "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/cors/v3"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-// A wrapper around envoy's native route.CorsPolicy with json marshaling provided by protojson
+// A wrapper around envoy's native cors.CorsPolicy with json marshaling provided by protojson
 
 type CorsPolicy struct {
-	route.CorsPolicy
+	cors.CorsPolicy
 }
 
 func init() {
@@ -23,12 +23,12 @@ func NewCorsPolicy() *CorsPolicy {
 
 // MarshalJSON -- uses protojson to marshall correctly
 func (recv *CorsPolicy) MarshalJSON() ([]byte, error) {
-	return protojson.Marshal((*route.CorsPolicy)(&recv.CorsPolicy))
+	return protojson.Marshal((*cors.CorsPolicy)(&recv.CorsPolicy))
 }
 
 // UnmarshalJSON -- uses protojson to marshall correctly
 func (recv *CorsPolicy) UnmarshalJSON(bb []byte) error {
-	return protojson.Unmarshal(bb, (*route.CorsPolicy)(&recv.CorsPolicy))
+	return protojson.Unmarshal(bb, (*cors.CorsPolicy)(&recv.CorsPolicy))
 }
 func (recv *CorsPolicy) DeepCopy() *CorsPolicy {
 	rr := CorsPolicy{}

@@ -9,21 +9,28 @@ import (
 	"strings"
 	"time"
 
+	"kapcom.adobe.com/config"
 	"kapcom.adobe.com/constants"
+	"kapcom.adobe.com/logger"
 	"kapcom.adobe.com/set"
 	"kapcom.adobe.com/util"
 	"kapcom.adobe.com/xds"
 
+	udpa_type "github.com/cncf/udpa/go/udpa/type/v1"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	ext_authz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
 	header_to_metadata "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
+	uri_template_matcher "github.com/envoyproxy/go-control-plane/envoy/extensions/path/match/uri_template/v3"
+	uri_template_rewriter "github.com/envoyproxy/go-control-plane/envoy/extensions/path/rewrite/uri_template/v3"
 	matcher "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	envoy_type "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/golang/protobuf/ptypes/any"
 	"github.com/golang/protobuf/ptypes/wrappers"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 	"gopkg.in/inconshreveable/log15.v2"
 	k8s "k8s.io/api/core/v1"
@@ -34,9 +41,11 @@ type VhostByName []*route.VirtualHost
 func (recv VhostByName) Len() int {
 	return len(recv)
 }
+
 func (recv VhostByName) Less(i, j int) bool {
 	return recv[i].Name < recv[j].Name
 }
+
 func (recv VhostByName) Swap(i, j int) {
 	recv[i], recv[j] = recv[j], recv[i]
 }
@@ -46,9 +55,11 @@ type WeightedClustersByName []*route.WeightedCluster_ClusterWeight
 func (recv WeightedClustersByName) Len() int {
 	return len(recv)
 }
+
 func (recv WeightedClustersByName) Less(i, j int) bool {
 	return recv[i].Name < recv[j].Name
 }
+
 func (recv WeightedClustersByName) Swap(i, j int) {
 	recv[i], recv[j] = recv[j], recv[i]
 }
@@ -58,7 +69,9 @@ type RouteByLength []*route.Route
 func (recv RouteByLength) Len() int {
 	return len(recv)
 }
+
 func (recv RouteByLength) Less(i, j int) bool {
+	// "exact" > "regex" > "path template" > "path separated prefix" > "prefix"
 	switch ri := recv[i].Match.PathSpecifier.(type) {
 	case *route.RouteMatch_Prefix:
 		switch rj := recv[j].Match.PathSpecifier.(type) {
@@ -72,7 +85,31 @@ func (recv RouteByLength) Less(i, j int) bool {
 			}
 			return len(ri.Prefix) > len(rj.Prefix) // longest first
 		case *route.RouteMatch_Path:
-			return false // exact first
+			return false // exact match wins over prefix match
+		case *route.RouteMatch_SafeRegex:
+			return false // regex match wins over prefix match
+		case *route.RouteMatch_PathMatchPolicy:
+			return false // template match wins over prefix match
+		case *route.RouteMatch_PathSeparatedPrefix:
+			return false // path-separated prefix match wins over prefix match
+		default:
+			return true
+		}
+	case *route.RouteMatch_SafeRegex:
+		switch rj := recv[j].Match.PathSpecifier.(type) {
+		case *route.RouteMatch_SafeRegex:
+			if ri.SafeRegex.GetRegex() == rj.SafeRegex.GetRegex() {
+				return compareHeaderMatchers(recv[i].Match.Headers, recv[j].Match.Headers)
+			}
+			return false // keep the order
+		case *route.RouteMatch_Path:
+			return false // exact match wins over regex match
+		case *route.RouteMatch_Prefix:
+			return true // regex match wins over prefix match
+		case *route.RouteMatch_PathMatchPolicy:
+			return true // regex match wins over template match
+		case *route.RouteMatch_PathSeparatedPrefix:
+			return true // regex match wins over path-separated prefix match
 		default:
 			return true
 		}
@@ -84,7 +121,66 @@ func (recv RouteByLength) Less(i, j int) bool {
 			}
 			return ri.Path < rj.Path
 		case *route.RouteMatch_Prefix:
-			return true // exact first
+			return true // exact match wins over prefix match
+		case *route.RouteMatch_SafeRegex:
+			return true // exact match wins over regex match
+		case *route.RouteMatch_PathMatchPolicy:
+			return true // exact match wins over template match
+		case *route.RouteMatch_PathSeparatedPrefix:
+			return true // exact match wins over path-separated prefix match
+		default:
+			return true
+		}
+	case *route.RouteMatch_PathMatchPolicy:
+		switch rj := recv[j].Match.PathSpecifier.(type) {
+		case *route.RouteMatch_PathMatchPolicy:
+			log := logger.New()
+			riAnypb := ri.PathMatchPolicy.GetTypedConfig()
+			riValue, ok := util.FromAny(log, riAnypb).(*uri_template_matcher.UriTemplateMatchConfig)
+			if !ok {
+				return false
+			}
+
+			rjAnypb := rj.PathMatchPolicy.GetTypedConfig()
+			rjValue, ok := util.FromAny(log, rjAnypb).(*uri_template_matcher.UriTemplateMatchConfig)
+			if !ok {
+				return false
+			}
+
+			if riValue.PathTemplate == rjValue.PathTemplate {
+				return compareHeaderMatchers(recv[i].Match.Headers, recv[j].Match.Headers)
+			}
+			return false // keep the order
+		case *route.RouteMatch_Path:
+			return false // exact match wins over template match
+		case *route.RouteMatch_Prefix:
+			return true // template match wins over prefix match
+		case *route.RouteMatch_SafeRegex:
+			return false // regex match wins over template match
+		case *route.RouteMatch_PathSeparatedPrefix:
+			return true // template match wins over path-separated prefix match
+		default:
+			return true
+		}
+	case *route.RouteMatch_PathSeparatedPrefix:
+		switch rj := recv[j].Match.PathSpecifier.(type) {
+		case *route.RouteMatch_PathSeparatedPrefix:
+			if ri.PathSeparatedPrefix == rj.PathSeparatedPrefix {
+				return compareHeaderMatchers(recv[i].Match.Headers, recv[j].Match.Headers)
+			}
+			// same length prefixes need to sort consistently
+			if len(ri.PathSeparatedPrefix) == len(rj.PathSeparatedPrefix) {
+				return ri.PathSeparatedPrefix < rj.PathSeparatedPrefix
+			}
+			return len(ri.PathSeparatedPrefix) > len(rj.PathSeparatedPrefix) // longest first
+		case *route.RouteMatch_Path:
+			return false // exact match wins over path-separated prefix match
+		case *route.RouteMatch_SafeRegex:
+			return false // regex match wins over path-separated prefix match
+		case *route.RouteMatch_PathMatchPolicy:
+			return false // template match wins over path-separated prefix match
+		case *route.RouteMatch_Prefix:
+			return true // path-separated prefix match wins over prefix match
 		default:
 			return true
 		}
@@ -92,6 +188,7 @@ func (recv RouteByLength) Less(i, j int) bool {
 		return true
 	}
 }
+
 func (recv RouteByLength) Swap(i, j int) {
 	recv[i], recv[j] = recv[j], recv[i]
 }
@@ -101,52 +198,66 @@ type HeaderMatcherByLength []*route.HeaderMatcher
 func (recv HeaderMatcherByLength) Len() int {
 	return len(recv)
 }
+
 func (recv HeaderMatcherByLength) Less(i, j int) bool {
 	if recv[i].Name == recv[j].Name {
 		// "exact" > "regex" > "present"
-		switch ri := recv[i].HeaderMatchSpecifier.(type) {
+		switch recv[i].HeaderMatchSpecifier.(type) {
 		case *route.HeaderMatcher_PresentMatch:
 			switch recv[j].HeaderMatchSpecifier.(type) {
 			case *route.HeaderMatcher_PresentMatch:
 				// "present" wins over "not present"
 				return !recv[i].InvertMatch
-			case *route.HeaderMatcher_SafeRegexMatch:
-				return false
-			case *route.HeaderMatcher_ExactMatch:
-				return false
-			}
-		case *route.HeaderMatcher_SafeRegexMatch:
-			switch rj := recv[j].HeaderMatchSpecifier.(type) {
-			case *route.HeaderMatcher_PresentMatch:
-				return true
-			case *route.HeaderMatcher_SafeRegexMatch:
-				if ri.SafeRegexMatch.Regex == rj.SafeRegexMatch.Regex {
-					// regex "match" wins over regex "not match"
-					return !recv[i].InvertMatch
+			case *route.HeaderMatcher_StringMatch:
+				switch recv[j].GetStringMatch().MatchPattern.(type) {
+				case *matcher.StringMatcher_Exact:
+					return false
+				case *matcher.StringMatcher_SafeRegex:
+					return false
 				}
-				// longest first
-				return len(ri.SafeRegexMatch.Regex) > len(rj.SafeRegexMatch.Regex)
-			case *route.HeaderMatcher_ExactMatch:
-				return false
 			}
-		case *route.HeaderMatcher_ExactMatch:
-			switch rj := recv[j].HeaderMatchSpecifier.(type) {
-			case *route.HeaderMatcher_PresentMatch:
-				return true
-			case *route.HeaderMatcher_SafeRegexMatch:
-				return true
-			case *route.HeaderMatcher_ExactMatch:
-				if ri.ExactMatch == rj.ExactMatch {
-					// "exact" wins over "not exact"
-					return !recv[i].InvertMatch
+		case *route.HeaderMatcher_StringMatch:
+			switch recv[i].GetStringMatch().MatchPattern.(type) {
+			case *matcher.StringMatcher_Exact:
+				switch recv[j].HeaderMatchSpecifier.(type) {
+				case *route.HeaderMatcher_PresentMatch:
+					return true
+				case *route.HeaderMatcher_StringMatch:
+					switch recv[j].GetStringMatch().MatchPattern.(type) {
+					case *matcher.StringMatcher_Exact:
+						if recv[i].GetStringMatch().GetExact() == recv[j].GetStringMatch().GetExact() {
+							// "exact" wins over "not exact"
+							return !recv[i].InvertMatch
+						}
+						// longest first
+						return len(recv[i].GetStringMatch().GetExact()) > len(recv[j].GetStringMatch().GetExact())
+					case *matcher.StringMatcher_SafeRegex:
+						return true
+					}
 				}
-				// longest first
-				return len(ri.ExactMatch) > len(rj.ExactMatch)
+			case *matcher.StringMatcher_SafeRegex:
+				switch recv[j].HeaderMatchSpecifier.(type) {
+				case *route.HeaderMatcher_PresentMatch:
+					return true
+				case *route.HeaderMatcher_StringMatch:
+					switch recv[j].GetStringMatch().MatchPattern.(type) {
+					case *matcher.StringMatcher_Exact:
+						return false
+					case *matcher.StringMatcher_SafeRegex:
+						if recv[i].GetStringMatch().GetSafeRegex().GetRegex() == recv[j].GetStringMatch().GetSafeRegex().GetRegex() {
+							// regex "match" wins over regex "not match"
+							return !recv[i].InvertMatch
+						}
+						// longest first
+						return len(recv[i].GetStringMatch().GetSafeRegex().GetRegex()) > len(recv[j].GetStringMatch().GetSafeRegex().GetRegex())
+					}
+				}
 			}
 		}
 	}
 	return recv[i].Name < recv[j].Name
 }
+
 func (recv HeaderMatcherByLength) Swap(i, j int) {
 	recv[i], recv[j] = recv[j], recv[i]
 }
@@ -188,7 +299,10 @@ func perFilterConfig(log log15.Logger, vhRoute *route.Route, xRoute *Route) {
 		spb := new(structpb.Struct)
 		spb.UnmarshalJSON(bs)
 
-		vhRoute.TypedPerFilterConfig[constants.IpAllowDenyFilter] = util.ToAny(log, spb)
+		vhRoute.TypedPerFilterConfig[constants.IpAllowDenyFilter] = util.ToAny(log, &udpa_type.TypedStruct{
+			TypeUrl: "envoy.config.filter.http.ip_allow_deny.v3.IpAllowDeny",
+			Value:   spb,
+		})
 	}
 
 	if xRoute.PerFilterConfig.HeaderSize != nil {
@@ -200,7 +314,10 @@ func perFilterConfig(log log15.Logger, vhRoute *route.Route, xRoute *Route) {
 		spb := new(structpb.Struct)
 		spb.UnmarshalJSON(bs)
 
-		vhRoute.TypedPerFilterConfig[constants.HeaderSizeFilter] = util.ToAny(log, spb)
+		vhRoute.TypedPerFilterConfig[constants.HeaderSizeFilter] = util.ToAny(log, &udpa_type.TypedStruct{
+			TypeUrl: "envoy.config.filter.http.header_size.v3.HeaderSizePerRoute",
+			Value:   spb,
+		})
 	}
 
 	if authz := xRoute.PerFilterConfig.Authz; authz != nil {
@@ -209,11 +326,57 @@ func perFilterConfig(log log15.Logger, vhRoute *route.Route, xRoute *Route) {
 		}
 
 		vhRoute.TypedPerFilterConfig[wellknown.HTTPExternalAuthorization] = util.ToAny(log, &authz.ExtAuthzPerRoute)
+
+		// add the dynamic forward proxy if needed
+		// NOTE: this filter is only enabled when Authz is used
+		if config.ExtAuthzRewrites() && xRoute.PerFilterConfig.DynamicForwardProxy != nil {
+			if vhRoute.TypedPerFilterConfig == nil {
+				vhRoute.TypedPerFilterConfig = make(map[string]*any.Any)
+			}
+
+			bs, _ := json.Marshal(xRoute.PerFilterConfig.DynamicForwardProxy)
+			spb := new(structpb.Struct)
+			spb.UnmarshalJSON(bs)
+
+			vhRoute.TypedPerFilterConfig[constants.DynFwdProxyFilter] = util.ToAny(log, spb)
+		}
+	}
+
+	if lua := xRoute.PerFilterConfig.Lua; lua != nil {
+		if vhRoute.TypedPerFilterConfig == nil {
+			vhRoute.TypedPerFilterConfig = make(map[string]*any.Any)
+		}
+
+		bs, _ := json.Marshal(xRoute.PerFilterConfig.Lua)
+		spb := new(structpb.Struct)
+		spb.UnmarshalJSON(bs)
+
+		vhRoute.TypedPerFilterConfig[wellknown.Lua] = util.ToAny(log, spb)
 	}
 }
 
-func headerMatchers(vhRoute *route.Route, xRoute *Route) {
-	for _, xHeaderMatcher := range xRoute.HeaderMatchers {
+func tracing(vhRoute *route.Route, xRoute *Route) {
+	vhRoute.Tracing = &route.Tracing{
+		ClientSampling: &envoy_type.FractionalPercent{
+			Numerator:   xRoute.Tracing.ClientSampling,
+			Denominator: envoy_type.FractionalPercent_HUNDRED,
+		},
+		RandomSampling: &envoy_type.FractionalPercent{
+			Numerator:   xRoute.Tracing.RandomSampling,
+			Denominator: envoy_type.FractionalPercent_HUNDRED,
+		},
+		OverallSampling: &envoy_type.FractionalPercent{
+			Numerator:   uint32(100),
+			Denominator: envoy_type.FractionalPercent_HUNDRED,
+		},
+	}
+}
+
+func headerMatchers(vhRoute *route.Route, xRoute *Route, delegates DelegatesChain) {
+	// calculate all the headers matchers, prepending all the possible matchers obtained from the delegates chain
+	headerMatchers := append(delegates.GetHeadersMatchers(), xRoute.HeaderMatchers...)
+
+	for _, xHeaderMatcher := range headerMatchers {
 		hm := &route.HeaderMatcher{
 			Name: xHeaderMatcher.Name,
 		}
@@ -229,33 +392,43 @@ func headerMatchers(vhRoute *route.Route, xRoute *Route) {
 			}
 		case xHeaderMatcher.Contains != "":
 			// TODO(lrouquet): possibly replace with HeaderMatcher_ContainsMatch (Envoy 1.16)
-			hm.HeaderMatchSpecifier = &route.HeaderMatcher_SafeRegexMatch{
-				SafeRegexMatch: &matcher.RegexMatcher{
-					EngineType: &matcher.RegexMatcher_GoogleRe2{
-						GoogleRe2: &matcher.RegexMatcher_GoogleRE2{},
+			hm.HeaderMatchSpecifier = &route.HeaderMatcher_StringMatch{
+				StringMatch: &matcher.StringMatcher{
+					MatchPattern: &matcher.StringMatcher_SafeRegex{
+						SafeRegex: &matcher.RegexMatcher{
+							// https://www.envoyproxy.io/docs/envoy/v1.15.2/api-v3/config/route/v3/route_components.proto#envoy-v3-api-field-config-route-v3-headermatcher-safe-regex-match
+							Regex: fmt.Sprintf(".*%s.*", regexp.QuoteMeta(xHeaderMatcher.Contains)),
+						},
 					},
-					// https://www.envoyproxy.io/docs/envoy/v1.15.2/api-v3/config/route/v3/route_components.proto#envoy-v3-api-field-config-route-v3-headermatcher-safe-regex-match
-					Regex: fmt.Sprintf(".*%s.*", regexp.QuoteMeta(xHeaderMatcher.Contains)),
 				},
 			}
 		case xHeaderMatcher.NotContains != "":
 			// TODO(lrouquet): same as above
-			hm.HeaderMatchSpecifier = &route.HeaderMatcher_SafeRegexMatch{
-				SafeRegexMatch: &matcher.RegexMatcher{
-					EngineType: &matcher.RegexMatcher_GoogleRe2{
-						GoogleRe2: &matcher.RegexMatcher_GoogleRE2{},
+			hm.HeaderMatchSpecifier = &route.HeaderMatcher_StringMatch{
+				StringMatch: &matcher.StringMatcher{
+					MatchPattern: &matcher.StringMatcher_SafeRegex{
+						SafeRegex: &matcher.RegexMatcher{
+							Regex: fmt.Sprintf(".*%s.*", regexp.QuoteMeta(xHeaderMatcher.NotContains)),
+						},
 					},
-					Regex: fmt.Sprintf(".*%s.*", regexp.QuoteMeta(xHeaderMatcher.NotContains)),
 				},
 			}
 			hm.InvertMatch = true
 		case xHeaderMatcher.Exact != "":
-			hm.HeaderMatchSpecifier = &route.HeaderMatcher_ExactMatch{
-				ExactMatch: xHeaderMatcher.Exact,
+			hm.HeaderMatchSpecifier = &route.HeaderMatcher_StringMatch{
+				StringMatch: &matcher.StringMatcher{
+					MatchPattern: &matcher.StringMatcher_Exact{
+						Exact: xHeaderMatcher.Exact,
+					},
+				},
 			}
 		case xHeaderMatcher.NotExact != "":
-			hm.HeaderMatchSpecifier = &route.HeaderMatcher_ExactMatch{
-				ExactMatch: xHeaderMatcher.NotExact,
+			hm.HeaderMatchSpecifier = &route.HeaderMatcher_StringMatch{
+				StringMatch: &matcher.StringMatcher{
+					MatchPattern: &matcher.StringMatcher_Exact{
+						Exact: xHeaderMatcher.NotExact,
+					},
+				},
 			}
 			hm.InvertMatch = true
 		}
@@ -263,17 +436,67 @@ func headerMatchers(vhRoute *route.Route, xRoute *Route) {
 	}
 }
 
-func routeMatch(xRoute *Route) *route.RouteMatch {
+func routeMatch(xRoute *Route, delegates DelegatesChain) *route.RouteMatch {
 	if xRoute.Path != "" {
+		// match on the exact path
+		// if there is a delegates chain, we need to prepend the computed prefix
+		path := JoinPath(delegates.GetPrefix(), xRoute.Path)
+
 		return &route.RouteMatch{
 			PathSpecifier: &route.RouteMatch_Path{
-				Path: xRoute.Path,
+				Path: path,
 			},
 		}
 	}
+
+	if xRoute.Regex != "" {
+		// match on the regex
+		// if there is a delegates chain, we need to prepend the computed prefix
+		regex := JoinPath(delegates.GetPrefix(), xRoute.Regex)
+		return &route.RouteMatch{
+			PathSpecifier: &route.RouteMatch_SafeRegex{
+				SafeRegex: &matcher.RegexMatcher{
+					Regex: regex,
+				},
+			},
+		}
+	}
+
+	if xRoute.PathTemplate != "" {
+		// match on the path template
+		// if there is a delegates chain, we need to prepend the computed prefix
+		pathTemplate := JoinPath(delegates.GetPrefix(), xRoute.PathTemplate)
+		pathTemplateMatchConfig, _ := anypb.New(&uri_template_matcher.UriTemplateMatchConfig{
+			PathTemplate: pathTemplate,
+		})
+
+		return &route.RouteMatch{
+			PathSpecifier: &route.RouteMatch_PathMatchPolicy{
+				PathMatchPolicy: &core.TypedExtensionConfig{
+					Name:        constants.UriTemplateMatcherExtension,
+					TypedConfig: pathTemplateMatchConfig,
+				},
+			},
+		}
+	}
+
+	if xRoute.PathSeparatedPrefix != "" {
+		// match on the path-separated prefix
+		// if there is a delegates chain, we need to prepend the computed prefix
+		pathSeparatedPrefix := JoinPath(delegates.GetPrefix(), xRoute.PathSeparatedPrefix)
+		return &route.RouteMatch{
+			PathSpecifier: &route.RouteMatch_PathSeparatedPrefix{
+				PathSeparatedPrefix: pathSeparatedPrefix,
+			},
+		}
+	}
+
+	// match on the prefix
+	// if there is a delegates chain, we need to prepend the computed prefix
+	prefix := JoinPath(delegates.GetPrefix(), xRoute.Match)
 	return &route.RouteMatch{
 		PathSpecifier: &route.RouteMatch_Prefix{
-			Prefix: xRoute.Match,
+			Prefix: prefix,
 		},
 	}
 }
@@ -293,7 +516,7 @@ func responseCode(code int32) route.RedirectAction_RedirectResponseCode {
 	return route.RedirectAction_MOVED_PERMANENTLY
 }
 
-func routeRedirect(role EnvoyRole, ssl, tls_ingress bool, xRoute *Route) *route.Route_Redirect {
+func routeRedirect(role EnvoyRole, ssl, tls_ingress bool, xRoute *Route, delegates DelegatesChain) *route.Route_Redirect {
 	var routeRedirect *route.Route_Redirect
 
 	// only redirect if the Ingress is explicitely configured with TLS
@@ -318,12 +541,14 @@ func routeRedirect(role EnvoyRole, ssl, tls_ingress bool, xRoute *Route) *route.
 		routeRedirect.Redirect.HostRedirect = xRoute.Redirect.HostRedirect
 		// only one of PathRedirect or PrefixRewrite
 		if xRoute.Redirect.PathRedirect != "" {
+			redirect := JoinPath(delegates.GetPrefix(), xRoute.Redirect.PathRedirect)
 			routeRedirect.Redirect.PathRewriteSpecifier = &route.RedirectAction_PathRedirect{
-				PathRedirect: xRoute.Redirect.PathRedirect,
+				PathRedirect: redirect,
 			}
 		} else if xRoute.Redirect.PrefixRewrite != "" {
+			rewrite := JoinPath(delegates.GetPrefix(), xRoute.Redirect.PrefixRewrite)
 			routeRedirect.Redirect.PathRewriteSpecifier = &route.RedirectAction_PrefixRewrite{
-				PrefixRewrite: xRoute.Redirect.PrefixRewrite,
+				PrefixRewrite: rewrite,
 			}
 		}
 		routeRedirect.Redirect.ResponseCode = responseCode(xRoute.Redirect.ResponseCode)
@@ -333,23 +558,33 @@ func routeRedirect(role EnvoyRole, ssl, tls_ingress bool, xRoute *Route) *route.
 	return routeRedirect
 }
 
-func updateClusterMeta(rc *route.RouteConfiguration, rcMeta *xds.RouteConfigurationMeta) {
-	rcMeta.Clusters = set.New()
+func routeDirectResponse(xRoute *Route) (routeDirectResponse *route.Route_DirectResponse) {
+	if xRoute.DirectResponseAction != nil {
+		routeDirectResponse = &route.Route_DirectResponse{
+			DirectResponse: &route.DirectResponseAction{
+				Status: xRoute.DirectResponseAction.Status,
+			},
+		}
+	}
 
-	xds.MapVHosts(rc, func(vh *route.VirtualHost) {
-		xds.MapClusterNames(vh, func(clusterName string) {
-			rcMeta.Clusters[clusterName] = nil
-		})
-	})
+	return
 }
 
 func (recv *CRDHandler) routeToVHostRoute(role EnvoyRole, ingress *Ingress,
-	ssl bool, clusterFilterPort *int32, xRoute *Route) (vhRoute *route.Route) {
-
-	if routeRedirect := routeRedirect(role, ssl, ingress.Listener.TLS != nil, xRoute); routeRedirect != nil {
+	ssl bool, clusterFilterPort *int32, xRoute *Route, chain DelegatesChain,
+) (vhRoute *route.Route) {
+	if routeRedirect := routeRedirect(role, ssl, ingress.Listener.TLS != nil, xRoute, chain); routeRedirect != nil {
 		vhRoute = &route.Route{
-			Match:  routeMatch(xRoute),
+			Match:  routeMatch(xRoute, chain),
 			Action: routeRedirect,
+		}
+		return
+	}
+
+	if routeDirectResponse := routeDirectResponse(xRoute); routeDirectResponse != nil {
+		vhRoute = &route.Route{
+			Match:  routeMatch(xRoute, chain),
+			Action: routeDirectResponse,
 		}
 		return
 	}
@@ -426,8 +661,18 @@ func (recv *CRDHandler) routeToVHostRoute(role EnvoyRole, ingress *Ingress,
 		}
 	}
 
-	routeAction := &route.RouteAction{
-		PrefixRewrite: xRoute.PrefixRewrite,
+	routeAction := &route.RouteAction{}
+	if xRoute.PrefixRewrite != "" {
+		routeAction.PrefixRewrite = xRoute.PrefixRewrite
+	}
+	if xRoute.PathTemplateRewrite != "" {
+		pathTemplateRewriteConfig, _ := anypb.New(&uri_template_rewriter.UriTemplateRewriteConfig{
+			PathTemplateRewrite: xRoute.PathTemplateRewrite,
+		})
+		routeAction.PathRewritePolicy = &core.TypedExtensionConfig{
+			Name:        constants.UriTemplateRewriterExtension,
+			TypedConfig: pathTemplateRewriteConfig,
+		}
 	}
 
 	if len(clusterWeights) > 1 {
@@ -435,8 +680,7 @@ func (recv *CRDHandler) routeToVHostRoute(role EnvoyRole, ingress *Ingress,
 
 		routeAction.ClusterSpecifier = &route.RouteAction_WeightedClusters{
 			WeightedClusters: &route.WeightedCluster{
-				Clusters:    clusterWeights,
-				TotalWeight: &wrappers.UInt32Value{Value: totalWeight},
+				Clusters: clusterWeights,
 			},
 		}
 	} else {
@@ -467,9 +711,6 @@ func (recv *CRDHandler) routeToVHostRoute(role EnvoyRole, ingress *Ingress,
 			xx[idx] = cp.RateLimit
 		}
 		routeAction.RateLimits = xx
-	}
-	if xRoute.CorsPolicy != nil {
-		routeAction.Cors = &xRoute.CorsPolicy.CorsPolicy
 	}
 	if len(xRoute.HashPolicies) > 0 {
 		hashPolicies := make([]*route.RouteAction_HashPolicy, 0, len(xRoute.HashPolicies))
@@ -599,8 +840,29 @@ func (recv *CRDHandler) routeToVHostRoute(role EnvoyRole, ingress *Ingress,
 		routeAction.IdleTimeout = ptypes.DurationProto(xRoute.IdleTimeout)
 	}
 
+	// When this route is "inside" a delegates chain and users have not defined a prefix
+	// or a path template rewrite, we need to rewrite the prefix.
+	// For example, imagine this route is for "/root-facade/child1/child2/final-path".
+	// We want to send the request to the upstream as /final-path
+	// so we must trim left the prefix of the chain (/root-facade/child1/child2)
+	if routeAction.PrefixRewrite == "" && routeAction.PathRewritePolicy == nil {
+		chainPrefix := chain.GetPrefix()
+		if chainPrefix != "" {
+			// we can skip the regex rewrite if the prefix is a simple "/", as it would be a noop
+			// see https://jira.corp.adobe.com/browse/ETHOS-49572
+			if chainPrefix != "/" {
+				routeAction.RegexRewrite = &matcher.RegexMatchAndSubstitute{
+					Pattern: &matcher.RegexMatcher{
+						Regex: "^" + chainPrefix + "(.*)$",
+					},
+					Substitution: "\\1",
+				}
+			}
+		}
+	}
+
 	vhRoute = &route.Route{
-		Match: routeMatch(xRoute),
+		Match: routeMatch(xRoute, chain),
 		Action: &route.Route_Route{
 			Route: routeAction,
 		},
@@ -613,7 +875,23 @@ func (recv *CRDHandler) routeToVHostRoute(role EnvoyRole, ingress *Ingress,
 		perFilterConfig(recv.log, vhRoute, xRoute)
 	}
 
-	headerMatchers(vhRoute, xRoute)
+	if xRoute.CorsPolicy != nil {
+		if vhRoute.TypedPerFilterConfig == nil {
+			vhRoute.TypedPerFilterConfig = make(map[string]*any.Any)
+		}
+		vhRoute.TypedPerFilterConfig[wellknown.CORS] = util.ToAny(recv.log, &xRoute.CorsPolicy.CorsPolicy)
+	}
+
+	if xRoute.Tracing != nil {
+		ic, exists := recv.lc.IngressClasses[ingress.Class]
+		if !exists || exists && ic.Tracing == nil {
+			recv.log.Warn("Tracing is not enabled for Listener but requested for Route",
+				"ns", ingress.Namespace, "name", ingress.Name, "route", xRoute.Match)
+		}
+		tracing(vhRoute, xRoute)
+	}
+
+	headerMatchers(vhRoute, xRoute, chain)
 
 	if add := xRoute.RequestHeadersToAdd; add != nil {
 		sort.Stable(KVPByKey(xRoute.RequestHeadersToAdd))
@@ -629,9 +907,7 @@ func (recv *CRDHandler) routeToVHostRoute(role EnvoyRole, ingress *Ingress,
 						Key:   kvp.Key,
 						Value: kvp.Value,
 					},
-					Append: &wrappers.BoolValue{
-						Value: false,
-					},
+					AppendAction: core.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 				})
 			}
 		}
@@ -652,9 +928,7 @@ func (recv *CRDHandler) routeToVHostRoute(role EnvoyRole, ingress *Ingress,
 					Key:   kvp.Key,
 					Value: kvp.Value,
 				},
-				Append: &wrappers.BoolValue{
-					Value: false,
-				},
+				AppendAction: core.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 			}
 		}
 		vhRoute.ResponseHeadersToAdd = hvos
@@ -686,6 +960,7 @@ func (recv *CRDHandler) ingressToVHost(sotw SotW, ingress *Ingress, ssl bool, cl
 		vh.RateLimits = rateLimits
 	}
 
+	authorizationPresent := false
 	if ingress.VirtualHost.Authorization != nil {
 		if vh.TypedPerFilterConfig == nil {
 			vh.TypedPerFilterConfig = make(map[string]*any.Any)
@@ -700,6 +975,8 @@ func (recv *CRDHandler) ingressToVHost(sotw SotW, ingress *Ingress, ssl bool, cl
 			}
 
 		case len(ingress.VirtualHost.Authorization.AuthPolicy.Context) > 0:
+			authorizationPresent = true
+
 			mp := make(map[string]string)
 			for k, v := range ingress.VirtualHost.Authorization.AuthPolicy.Context {
 				mp[k] = v
@@ -751,7 +1028,10 @@ func (recv *CRDHandler) ingressToVHost(sotw SotW, ingress *Ingress, ssl bool, cl
 	}
 
 	if ingress.VirtualHost.Cors != nil {
-		vh.Cors = &ingress.VirtualHost.Cors.CorsPolicy
+		if vh.TypedPerFilterConfig == nil {
+			vh.TypedPerFilterConfig = make(map[string]*any.Any)
+		}
+		vh.TypedPerFilterConfig[wellknown.CORS] = util.ToAny(recv.log, &ingress.VirtualHost.Cors.CorsPolicy)
 	}
 
 	if ingress.VirtualHost.ResponseHeadersToAdd != nil {
@@ -763,22 +1043,38 @@ func (recv *CRDHandler) ingressToVHost(sotw SotW, ingress *Ingress, ssl bool, cl
 					Key:   kvp.Key,
 					Value: kvp.Value,
 				},
-				Append: &wrappers.BoolValue{
-					Value: false,
-				},
+				AppendAction: core.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD,
 			}
 		}
 		vh.ResponseHeadersToAdd = hvos
 	}
 
 	for _, xRoute := range ingress.VirtualHost.ResolvedRoutes() {
-		vhRoute := recv.routeToVHostRoute(sotw.role, ingress, ssl, clusterFilterPort, xRoute)
-		if vhRoute != nil {
-			vh.Routes = append(vh.Routes, vhRoute)
+		// if this route is inheriting things from parents, then iterate over the parents
+		if len(xRoute.DelegatesChains.From(ingress)) > 0 {
+			for _, chain := range xRoute.DelegatesChains.From(ingress) {
+				vhRoute := recv.routeToVHostRoute(sotw.role, ingress, ssl, clusterFilterPort, xRoute, chain)
+				if vhRoute != nil {
+					vh.Routes = append(vh.Routes, vhRoute)
+				}
+			}
+		} else {
+			vhRoute := recv.routeToVHostRoute(sotw.role, ingress, ssl, clusterFilterPort, xRoute, DelegatesChain{})
+			if vhRoute != nil {
+				vh.Routes = append(vh.Routes, vhRoute)
+			}
 		}
 	}
 
 	sort.Stable(RouteByLength(vh.Routes))
+
+	if authorizationPresent {
+		// preprend the dynamic forward routes when external authorization is in use
+		vhRoutes := GetAuthzRewriteRoutes(recv.log)
+		if vhRoutes != nil {
+			vh.Routes = append(vhRoutes, GetRoutesDisabledLua(recv.log, vh.Routes)...)
+		}
+	}
 
 	switch sotw.role {
 	case GatewayRole:
@@ -799,25 +1095,12 @@ func (recv *CRDHandler) ingressToVHost(sotw SotW, ingress *Ingress, ssl bool, cl
 			RetryOn:    "connect-failure",
 			NumRetries: &wrappers.UInt32Value{Value: 3},
 		}
-
-		if perRoute := sotw.sidecar.Spec.Filters.ExtAuthzPerRoute; perRoute != nil && perRoute.CheckSettings != nil {
-			vh.TypedPerFilterConfig = map[string]*any.Any{
-				wellknown.HTTPExternalAuthorization: util.ToAny(recv.log, &ext_authz.ExtAuthzPerRoute{
-					Override: &ext_authz.ExtAuthzPerRoute_CheckSettings{
-						CheckSettings: &ext_authz.CheckSettings{
-							ContextExtensions: perRoute.CheckSettings.ContextExtensions,
-						},
-					},
-				}),
-			}
-		}
 	}
 
 	return vh
 }
 
 func (recv *CRDHandler) removeVirtualHost(ingress *Ingress) {
-
 	if ingress.Fqdn == "" {
 		return
 	}
@@ -834,6 +1117,10 @@ func (recv *CRDHandler) removeVirtualHost(ingress *Ingress) {
 			)
 			rc := msg.(*route.RouteConfiguration)
 			rcMeta := (*meta).(*xds.RouteConfigurationMeta)
+
+			if rcMeta.Class != ingress.Class {
+				return
+			}
 
 			for vhi, vh = range rc.VirtualHosts {
 				if vh.Name == ingress.Fqdn {
@@ -854,8 +1141,6 @@ func (recv *CRDHandler) removeVirtualHost(ingress *Ingress) {
 			vhs := rc.VirtualHosts
 			vhs = append(vhs[:vhi], vhs[vhi+1:]...)
 			rc.VirtualHosts = vhs
-
-			updateClusterMeta(rc, rcMeta)
 
 			protoChanged = true
 			return
@@ -893,10 +1178,16 @@ func (recv *CRDHandler) updateGatewayRDS(sotw SotW, ingresses []*Ingress) {
 			} else {
 				wrapper = xds.NewWrapper(
 					&route.RouteConfiguration{
-						Name:                routeName,
-						InternalOnlyHeaders: []string{constants.ServiceIdHeader},
+						Name: routeName,
+						InternalOnlyHeaders: []string{
+							constants.ServiceIdHeader,
+							constants.HostPortRewriteHeader,
+							constants.ProtocolRewriteHeader,
+							constants.PathRewriteHeader,
+						},
 					}, &xds.RouteConfigurationMeta{
-						Clusters: set.New(),
+						Class:           ingress.Class,
+						ClustersWarming: set.New(),
 					},
 				)
 				sotw.rds[routeName] = wrapper
@@ -909,7 +1200,6 @@ func (recv *CRDHandler) updateGatewayRDS(sotw SotW, ingresses []*Ingress) {
 					foundVH bool
 				)
 				rc := msg.(*route.RouteConfiguration)
-				rcMeta := (*meta).(*xds.RouteConfigurationMeta)
 
 				for vhi, vh = range rc.VirtualHosts {
 					if vh.Name == ingress.Fqdn {
@@ -950,7 +1240,6 @@ func (recv *CRDHandler) updateGatewayRDS(sotw SotW, ingresses []*Ingress) {
 				}
 
 				if protoChanged {
-					updateClusterMeta(rc, rcMeta)
 					shouldUpdateRDS = true
 				}
 
@@ -1018,20 +1307,11 @@ func (recv *CRDHandler) updateSidecarRDS(sotw SotW, ingress *Ingress) {
 					wrapper = xds.NewWrapper(
 						newRouteConfig,
 						&xds.RouteConfigurationMeta{
-							Clusters: set.New(),
+							Class:           ingress.Class,
+							ClustersWarming: set.New(),
 						},
 					)
 					shouldUpdateRDS = true
-				}
-
-				if shouldUpdateRDS {
-					wrapper.Write(func(msg proto.Message, meta *interface{}) (protoChanged bool) {
-						rc := msg.(*route.RouteConfiguration)
-						rcMeta := (*meta).(*xds.RouteConfigurationMeta)
-
-						updateClusterMeta(rc, rcMeta)
-						return
-					})
 				}
 
 				uniqueRouteConfigs[routeConfigName] = wrapper

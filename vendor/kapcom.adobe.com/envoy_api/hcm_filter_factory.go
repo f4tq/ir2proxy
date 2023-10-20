@@ -7,9 +7,10 @@ import (
 )
 
 // HcmTypedConfigFactory accounts for the vast number of HTTPTypedFilterConfigs that are very often based
-//  on protobufs that DO NOT Marshal/Unmarshal correctly due to the use of `oneof` in protobuf definitions.
-//  The HTTPFilterTypedConfig  in strict_types aliases, and effectively delegates, to HcmTypedConfigFactory.
-//  If an entry for  'type' exists in filterTypeConverter, unmarshal get passed to the registered handler
+//
+//	on protobufs that DO NOT Marshal/Unmarshal correctly due to the use of `oneof` in protobuf definitions.
+//	The HTTPFilterTypedConfig  in strict_types aliases, and effectively delegates, to HcmTypedConfigFactory.
+//	If an entry for  'type' exists in filterTypeConverter, unmarshal get passed to the registered handler
 type (
 	HcmTypedConfigFactory struct {
 		Type    string `json:"@type,omitempty"`

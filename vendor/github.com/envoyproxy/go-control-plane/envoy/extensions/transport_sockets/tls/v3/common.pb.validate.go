@@ -190,9 +190,18 @@ func (m *PrivateKeyProvider) validate(all bool) error {
 		errors = append(errors, err)
 	}
 
-	switch m.ConfigType.(type) {
-
+	switch v := m.ConfigType.(type) {
 	case *PrivateKeyProvider_TypedConfig:
+		if v == nil {
+			err := PrivateKeyProviderValidationError{
+				field:  "ConfigType",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetTypedConfig()).(type) {
@@ -223,6 +232,8 @@ func (m *PrivateKeyProvider) validate(all bool) error {
 			}
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
@@ -1398,6 +1409,21 @@ func (m *CertificateValidationContext) validate(all bool) error {
 	}
 
 	// no validation rules for OnlyVerifyLeafCertCrl
+
+	if wrapper := m.GetMaxVerifyDepth(); wrapper != nil {
+
+		if wrapper.GetValue() > 100 {
+			err := CertificateValidationContextValidationError{
+				field:  "MaxVerifyDepth",
+				reason: "value must be less than or equal to 100",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+
+	}
 
 	if len(errors) > 0 {
 		return CertificateValidationContextMultiError(errors)

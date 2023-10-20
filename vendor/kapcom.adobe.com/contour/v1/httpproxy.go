@@ -46,15 +46,43 @@ type Include struct {
 	Namespace string `json:"namespace,omitempty"`
 	// Conditions are a set of routing properties that is applied to an HTTPProxy in a namespace.
 	// +optional
-	Conditions []Condition `json:"conditions,omitempty"`
+	Conditions []IncludeCondition `json:"conditions,omitempty"`
+}
+
+// IncludeCondition are policies that are applied to included HTTPProxies.
+// One of Prefix or Header must be provided.
+type IncludeCondition struct {
+	// Prefix defines a prefix match for a request.
+	// +optional
+	Prefix string `json:"prefix,omitempty"`
+
+	// Header specifies the header condition to match.
+	// +optional
+	Header *HeaderCondition `json:"header,omitempty"`
 }
 
 // Condition are policies that are applied on top of HTTPProxies.
-// One of Prefix or Header must be provided.
+// One of Prefix, Path, Regex, PathTemplate, PathSeparatedPrefix or Header must be provided.
 type Condition struct {
 	// Prefix defines a prefix match for a request.
 	// +optional
 	Prefix string `json:"prefix,omitempty"`
+
+	// Path defines an exact path match for a request.
+	// +optional
+	Path string `json:"adobe:path,omitempty"`
+
+	// Regex defines a path regex match for a request.
+	// +optional
+	Regex string `json:"adobe:pathRegex,omitempty"`
+
+	// PathTemplate defines a template pattern rule for a request.
+	// +optional
+	PathTemplate string `json:"adobe:pathTemplate,omitempty"`
+
+	// PathSeparatedPrefix defines either an exact path match or a prefix match, followed by /, for a request.
+	// +optional
+	PathSeparatedPrefix string `json:"adobe:pathSeparatedPrefix,omitempty"`
 
 	// Header specifies the header condition to match.
 	// +optional
@@ -233,8 +261,23 @@ type CORSPolicy struct {
 	MaxAge string `json:"maxAge,omitempty"`
 }
 
+// Allows to configure percentage of traces
+type Tracing struct {
+	// target percentage of  requests that will be
+	// force traced if the x-client-trace-id
+	// header is set.
+	ClientSampling uint32 `json:"clientSampling,omitempty"`
+	// Target percentage of requests that will be
+	// randomly selected for trace generation,
+	// if not requested by the client or not forced.
+	RandomSampling uint32 `json:"randomSampling,omitempty"`
+}
+
 // Route contains the set of routes for a virtual host.
 type Route struct {
+	// Tracing allows to configure percentage of
+	// traces that Envoy will generate for service.
+	Tracing *Tracing `json:"adobe:tracing,omitempty"`
 	// Conditions are a set of routing properties that is applied to an HTTPProxy in a namespace.
 	// +optional
 	Conditions []Condition `json:"conditions,omitempty"`
@@ -266,7 +309,7 @@ type Route struct {
 	LoadBalancerPolicy *LoadBalancerPolicy `json:"loadBalancerPolicy,omitempty"`
 	//Least request load balancing config
 	// +optional
-	LeastRequestLbConfig *LeastRequestLbConfig `json:"adobe:leastRequestLbConfig, omitempty"`
+	LeastRequestLbConfig *LeastRequestLbConfig `json:"adobe:leastRequestLbConfig,omitempty"`
 	//'Cookie' load balancing policy with ttl,path
 	// +optional
 	CookieLbConfig *CookieLbConfig `json:"adobe:cookieLbConfig,omitempty"`
@@ -291,6 +334,28 @@ type Route struct {
 	// The policy for rate limiting on the route.
 	// +optional
 	RateLimitPolicy *RateLimitPolicy `json:"rateLimitPolicy,omitempty"`
+
+	// DirectResponsePolicy returns an arbitrary HTTP response directly.
+	// +optional
+	DirectResponsePolicy *HTTPDirectResponsePolicy `json:"directResponsePolicy,omitempty"`
+}
+
+type HTTPDirectResponsePolicy struct {
+	// StatusCode is the HTTP response status to be returned.
+	// +required
+	// +kubebuilder:validation:Minimum=200
+	// +kubebuilder:validation:Maximum=599
+	StatusCode uint32 `json:"statusCode"`
+
+	// Body is the content of the response body.
+	// If this setting is omitted, no body is included in the generated response.
+	//
+	// Note: Body is not recommended to set too long
+	// otherwise it can have significant resource usage impacts.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=100
+	//Body string `json:"body,omitempty"`
 }
 
 // RateLimitPolicy defines rate limiting parameters.
@@ -349,6 +414,12 @@ type RateLimitDescriptorEntry struct {
 	// and a value equal to the client's IP address (from x-forwarded-for).
 	// +optional
 	RemoteAddress *RemoteAddressDescriptor `json:"remoteAddress,omitempty"`
+
+	// Metadata defines a descriptor entry that is populated only
+	// if the value of metadata_key is found in the dynamic metadata / is of type string
+	// Use this descriptor to extract information from dynamic metadata
+	// +optional
+	Metadata *MetadataDescriptor `json:"adobe:metadata,omitempty"`
 }
 
 // GenericKeyDescriptor defines a descriptor entry with a static key and
@@ -402,6 +473,44 @@ type RequestHeaderValueMatchDescriptor struct {
 	Value string `json:"value,omitempty"`
 }
 
+// MetadataDescriptor defines a descriptor entry that's populated only
+// if a given header is present on the request. The value of the descriptor
+// entry is equal to the value of the metadata_key (if present).
+type MetadataDescriptor struct {
+	// DescriptorKey defines the key to use for the descriptor entry.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	DescriptorKey string `json:"descriptorKey,omitempty"`
+
+	// MetadataKey - Metadata struct that defines the key and path to retrieve
+	// the string value. A match will only happen if the value
+	// in the dynamic metadata is of type string.
+	// +required
+	MetadataKey *MetadataKey `json:"metadataKey,omitempty"`
+
+	// DefaultValue - An optional value to use if metadata_key is empty.
+	// If not set and no value is present under the metadata_key
+	// then no descriptor is generated.
+	// +optional
+	DefaultValue string `json:"defaultValue,omitempty"`
+}
+
+// MetadataKey provides a general interface using key and path to retrieve value from Metadata.
+// https://www.envoyproxy.io/docs/envoy/latest/api-v3/type/metadata/v3/metadata.proto#envoy-v3-api-msg-type-metadata-v3-metadatakey
+type MetadataKey struct {
+	// The key name of Metadata to retrieve the Struct from the metadata.
+	// Typically, it represents a builtin subsystem or custom extension.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Key string `json:"key,omitempty"`
+
+	// The path to retrieve the Value from the Struct.
+	// It can be a prefix or a full path,
+	// e.g. [prop, xyz] for a struct or [prop, foo] for a string in the example, which depends on the particular scenario.
+	// +kubebuilder:validation:MinItems=1
+	Path []string `json:"path,omitempty"`
+}
+
 // RemoteAddressDescriptor defines a descriptor entry with a key of
 // "remote_address" and a value equal to the client's IP address
 // (from x-forwarded-for).
@@ -414,7 +523,7 @@ type TCPProxy struct {
 	LoadBalancerPolicy *LoadBalancerPolicy `json:"loadBalancerPolicy,omitempty"`
 	//Least request load balancing config
 	// +optional
-	LeastRequestLbConfig *LeastRequestLbConfig `json:"adobe:leastRequestLbConfig, omitempty"`
+	LeastRequestLbConfig *LeastRequestLbConfig `json:"adobe:leastRequestLbConfig,omitempty"`
 
 	// Services are the services to proxy traffic
 	Services []Service `json:"services,omitempty"`
@@ -440,6 +549,10 @@ type Service struct {
 	Name string `json:"name"`
 	// Port (defined as Integer) to proxy traffic to since a service can have multiple defined.
 	Port int `json:"port"`
+	// Protocol may be used to specify (or override) the protocol used to reach
+	// this Service. Values may be tls, h2, h2c. If omitted, protocol-selection
+	// falls back on Service annotations.
+	Protocol *string `json:"protocol,omitempty"`
 	// Weight defines percentage of traffic to balance traffic
 	// +optional
 	Weight *uint32 `json:"weight,omitempty"`
@@ -448,6 +561,9 @@ type Service struct {
 	UpstreamValidation *UpstreamValidation `json:"validation,omitempty"`
 	// If Mirror is true the Service will receive a read only mirror of the traffic for this route.
 	Mirror bool `json:"mirror,omitempty"`
+	// Slow start will gradually increase amount of traffic to a newly added endpoint.
+	// +optional
+	SlowStartPolicy *SlowStartPolicy `json:"slowStartPolicy,omitempty"`
 }
 
 // HTTPHealthCheckPolicy defines health checks on the upstream service.
@@ -481,6 +597,14 @@ type TimeoutPolicy struct {
 	// Timeout after which if there are no active requests, the connection between Envoy and the
 	// backend will be closed.
 	Idle string `json:"idle"`
+
+	// Timeout for how long connection from the proxy to the upstream service is kept when there are no active requests.
+	// If not supplied, a cluster default value of 58s applies.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^(((\d*(\.\d*)?h)|(\d*(\.\d*)?m)|(\d*(\.\d*)?s)|(\d*(\.\d*)?ms)|(\d*(\.\d*)?us)|(\d*(\.\d*)?µs)|(\d*(\.\d*)?ns))+|infinity|infinite)$`
+	IdleConnection string `json:"idleConnection,omitempty"`
+
+	Connect string `json:"adobe:connect,omitempty"`
 }
 
 // RetryPolicy defines the attributes associated with retrying policy.
@@ -520,6 +644,32 @@ type ReplacePrefix struct {
 	Replacement string `json:"replacement"`
 }
 
+// ReplacePathTemplate describes a path template replacement.
+type ReplacePathTemplate struct {
+	// Prefix specifies the URL path prefix to be replaced.
+	//
+	// If Prefix is specified, it must exactly match the MatchCondition
+	// path template that is rendered by the chain of including HTTPProxies
+	// and only that path template will be replaced by Replacement.
+	// This allows HTTPProxies that are included through multiple
+	// roots to only replace specific path templates, leaving others
+	// unmodified.
+	//
+	// If Prefix is not specified, all routing path templates rendered
+	// by the include chain will be replaced.
+	//
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	Prefix string `json:"prefix,omitempty"`
+
+	// Replacement is the string that the routing path template
+	// will be replaced with. This must not be empty.
+	//
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Replacement string `json:"replacement"`
+}
+
 // PathRewritePolicy specifies how a request URL path should be
 // rewritten. This rewriting takes place after a request is routed
 // and has no subsequent effects on the proxy's routing decision.
@@ -530,6 +680,9 @@ type PathRewritePolicy struct {
 	// ReplacePrefix describes how the path prefix should be replaced.
 	// +optional
 	ReplacePrefix []ReplacePrefix `json:"replacePrefix,omitempty"`
+	// ReplacePathTemplate describes how the path template should be replaced.
+	// +optional
+	ReplacePathTemplate []ReplacePathTemplate `json:"adobe:replacePathTemplate,omitempty"`
 }
 
 // HeaderHashOptions contains options to configure a HTTP request header hash
@@ -669,4 +822,36 @@ type HTTPProxyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata"`
 	Items           []HTTPProxy `json:"items"`
+}
+
+// SlowStartPolicy will gradually increase amount of traffic to a newly added endpoint.
+// It can be used only with RoundRobin and WeightedLeastRequest load balancing strategies.
+type SlowStartPolicy struct {
+	// The duration of slow start window.
+	// Duration is expressed in the Go [Duration format](https://godoc.org/time#ParseDuration).
+	// Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
+	// +required
+	// +kubebuilder:validation:Pattern=`^(((\d*(\.\d*)?h)|(\d*(\.\d*)?m)|(\d*(\.\d*)?s)|(\d*(\.\d*)?ms)|(\d*(\.\d*)?us)|(\d*(\.\d*)?µs)|(\d*(\.\d*)?ns))+)$`
+	Window string `json:"window"`
+
+	// The speed of traffic increase over the slow start window.
+	// Defaults to 1.0, so that endpoint would get linearly increasing amount of traffic.
+	// When increasing the value for this parameter, the speed of traffic ramp-up increases non-linearly.
+	// The value of aggression parameter should be greater than 0.0.
+	//
+	// More info: https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/slow_start
+	//
+	// +optional
+	// +kubebuilder:default=`1.0`
+	// +kubebuilder:validation:Pattern=`^([0-9]+([.][0-9]+)?|[.][0-9]+)$`
+	Aggression string `json:"aggression"`
+
+	// The minimum or starting percentage of traffic to send to new endpoints.
+	// A non-zero value helps avoid a too small initial weight, which may cause endpoints in slow start mode to receive no traffic in the beginning of the slow start window.
+	// If not specified, the default is 10%.
+	// +optional
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	MinimumWeightPercent uint32 `json:"minWeightPercent"`
 }

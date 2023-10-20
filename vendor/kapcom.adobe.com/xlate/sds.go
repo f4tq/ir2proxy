@@ -143,6 +143,9 @@ func (recv *CRDHandler) updateSDS(iface, ifaceOld interface{}) {
 	// we have a kSecret and need to find out if any Ingress references it
 	if !referenced {
 		recv.mapIngresses(func(ingress *Ingress) (stop bool) {
+			if !ingress.Valid() {
+				return
+			}
 			if !recv.isHighestPriorityIngress(ingress) {
 				return
 			}

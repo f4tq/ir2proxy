@@ -46,9 +46,7 @@ type HeaderValue struct {
 	Value string `json:"value"`
 }
 
-//
 // HeadersPolicy
-//
 func (recv *HeadersPolicy) err(hostOk bool) error {
 	if recv == nil {
 		return nil

@@ -1,10 +1,14 @@
 package envoy_api
 
+import (
+	"github.com/golang/protobuf/ptypes/any"
+)
+
 type (
 	//
 	// CDS and commmon
 	//
-
+	Any        = any.Any
 	DataSource struct {
 		InlineBytes  string `json:"inline_bytes,omitempty"`
 		InlineString string `json:"inline_string,omitempty"`
@@ -105,6 +109,7 @@ type (
 		LbPolicy                      string                    `json:"lb_policy,omitempty"`
 		TransportSocket               *TransportSocket          `json:"transport_socket,omitempty"`
 		LoadAssignment                LoadAssignment            `json:"load_assignment,omitempty"`
+		TypedExtensionProtocolOptions map[string]*Any           `json:"typed_extension_protocol_options,omitempty" nocompare`
 		IgnoreHealthOnHostRemoval     bool                      `json:"ignore_health_on_host_removal,omitempty" nocompare` // new in v3
 	}
 
@@ -318,26 +323,32 @@ type (
 	//
 
 	Match struct {
-		Prefix  string          `json:"prefix,omitempty"`
-		Path    string          `json:"path,omitempty"`
-		Headers []HeaderMatcher `json:"headers,omitempty"`
+		Prefix              string               `json:"prefix,omitempty"`
+		Path                string               `json:"path,omitempty"`
+		SafeRegex           RegexMatcher         `json:"safe_regex,omitempty"`
+		PathMatchPolicy     TypedExtensionConfig `json:"path_match_policy,omitempty"`
+		PathSeparatedPrefix string               `json:"path_separated_prefix,omitempty"`
+		Headers             []HeaderMatcher      `json:"headers,omitempty"`
 	}
 	HeaderMatcher struct {
-		Name           string       `json:"name,omitempty"`
-		ExactMatch     string       `json:"exact_match,omitempty"`
-		SafeRegexMatch RegexMatcher `json:"safe_regex_match,omitempty"`
-		RangeMatch     Int64Range   `json:"range_match,omitempty"`
-		PresentMatch   bool         `json:"present_match,omitempty"`
-		PrefixMatch    string       `json:"prefix_match,omitempty"`
-		SuffixMatch    string       `json:"suffix_match,omitempty"`
-		ContainsMatch  string       `json:"contains_match,omitempty"`
-		InvertMatch    bool         `json:"invert_match,omitempty"`
+		Name          string     `json:"name,omitempty"`
+		ExactMatch    string     `json:"exact_match,omitempty"`
+		RangeMatch    Int64Range `json:"range_match,omitempty"`
+		PresentMatch  bool       `json:"present_match,omitempty"`
+		PrefixMatch   string     `json:"prefix_match,omitempty"`
+		SuffixMatch   string     `json:"suffix_match,omitempty"`
+		ContainsMatch string     `json:"contains_match,omitempty"`
+		InvertMatch   bool       `json:"invert_match,omitempty"`
 	}
 	RegexMatcher struct {
 		GoogleRe2 GoogleRE2 `json:"google_re2,omitempty"`
 		Regex     string    `json:"regex,omitempty"`
 	}
-	GoogleRE2  struct{}
+	GoogleRE2            struct{}
+	TypedExtensionConfig struct {
+		Name        string `json:"name,omitempty"`
+		TypedConfig *Any   `json:"typed_config,omitempty" nocompare`
+	}
 	Int64Range struct {
 		Start int64 `json:"start,omitempty"`
 		End   int64 `json:"end,omitempty"`
@@ -367,21 +378,21 @@ type (
 		Weight int    `json:"weight,omitempty"`
 	}
 	WeightedClusters struct {
-		Clusters    []ClusterWeight `json:"clusters,omitempty"`
-		TotalWeight int             `json:"total_weight,omitempty"`
+		Clusters []ClusterWeight `json:"clusters,omitempty"`
 	}
 	RouteAction struct {
-		Cluster            string           `json:"cluster,omitempty" nocompare` // same reason as Cluster.Name
-		WeightedClusters   WeightedClusters `json:"weighted_clusters,omitempty"`
-		Timeout            string           `json:"timeout,omitempty"`
-		UpgradeConfigs     []UpgradeConfigs `json:"upgrade_configs,omitempty"`
-		HashPolicy         []HashPolicy     `json:"hash_policy,omitempty"`
-		IdleTimeout        string           `json:"idle_timeout,omitempty"`
-		HostRewriteLiteral string           `json:"host_rewrite_literal,omitempty"`
-		PrefixRewrite      string           `json:"prefix_rewrite,omitempty"`
-		RetryPolicy        RetryPolicy      `json:"retry_policy,omitempty"`
-		RateLimits         []RateLimit      `json:"rate_limits,omitempty"`
-		Cors               CorsPolicy       `json:"cors,omitempty" kapcom:"forcecompare"`
+		Cluster            string               `json:"cluster,omitempty" nocompare` // same reason as Cluster.Name
+		WeightedClusters   WeightedClusters     `json:"weighted_clusters,omitempty"`
+		Timeout            string               `json:"timeout,omitempty"`
+		UpgradeConfigs     []UpgradeConfigs     `json:"upgrade_configs,omitempty"`
+		HashPolicy         []HashPolicy         `json:"hash_policy,omitempty"`
+		IdleTimeout        string               `json:"idle_timeout,omitempty"`
+		HostRewriteLiteral string               `json:"host_rewrite_literal,omitempty"`
+		PrefixRewrite      string               `json:"prefix_rewrite,omitempty"`
+		PathRewritePolicy  TypedExtensionConfig `json:"path_rewrite_policy,omitempty"`
+		RetryPolicy        RetryPolicy          `json:"retry_policy,omitempty"`
+		RateLimits         []RateLimit          `json:"rate_limits,omitempty"`
+		Cors               CorsPolicy           `json:"cors,omitempty" kapcom:"forcecompare"`
 	}
 	HeaderSize struct {
 		MaxBytes int `json:"max_bytes,omitempty"`
@@ -447,7 +458,6 @@ type (
 	}
 	VirtualHost struct {
 		Name                 string               `json:"name,omitempty" nocompare` // sometimes hashed in Contour
-		Cors                 CorsPolicy           `json:"cors,omitempty" kapcom:"forcecompare""`
 		Domains              []string             `json:"domains,omitempty"`
 		Routes               []Route              `json:"routes,omitempty"`
 		RetryPolicy          RetryPolicy          `json:"retry_policy,omitempty"`

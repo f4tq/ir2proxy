@@ -1,7 +1,6 @@
 package xlate
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -12,10 +11,10 @@ import (
 	"kapcom.adobe.com/envoy_api"
 
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	ext_authz "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_authz/v3"
+	lua "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/lua/v3"
 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/golang/protobuf/ptypes/wrappers"
-	"google.golang.org/protobuf/encoding/protojson"
+	"github.com/google/uuid"
 	k8s "k8s.io/api/core/v1"
 )
 
@@ -39,6 +38,10 @@ type (
 
 		// CRD migration (default: Ingress 0, IngressRoute 1, HTTPProxy 2)
 		Priority int
+
+		// A UUID used during CRD migration between namespaces to prevent
+		// fqdn hijacking
+		MigrationID uuid.UUID
 
 		// Ingress Class. Don't stutter
 		Class string
@@ -148,13 +151,18 @@ type (
 	// +k8s:deepcopy-gen=true
 	Route struct {
 		Delegate                *Delegate
+		Tracing                 *RouteTracing
 		namespace               string // copy of the namespace to which this Route belongs
 		delegationFailed        bool
 		CorsPolicy              *CorsPolicy
 		Match                   string // Prefix match
 		Path                    string // Exact match
+		Regex                   string // Regex match
+		PathTemplate            string // Path Template match
+		PathSeparatedPrefix     string // Path-separated Prefix match
 		HeaderMatchers          []HeaderMatcher
 		PrefixRewrite           string
+		PathTemplateRewrite     string
 		SPDYUpgrade             bool
 		WebsocketUpgrade        bool
 		HTTPSRedirect           bool
@@ -169,9 +177,24 @@ type (
 		ResponseHeadersToRemove []string
 		RateLimits              []*RateLimit
 
+		// DelegatesChains is a map that contains all the chains of delegates that can lead to this route
+		// from different ingresses. Note well that can be more than one chain from the same root ingress,
+		// as the same route can be delegated following different paths.
+		// This can be used for inheriting some conditions of the parent
+		// (ie, when using "include" in HTTPProxies, and the /prefix must me prepended)
+		DelegatesChains DelegatesChains
+
 		Clusters []Cluster
 
 		Redirect *Redirect
+
+		DirectResponseAction *DirectResponseAction
+	}
+
+	// +k8s:deepcopy-gen=true
+	RouteTracing struct {
+		ClientSampling uint32 `json:"clientSampling,omitempty"`
+		RandomSampling uint32 `json:"randomSampling,omitempty"`
 	}
 
 	// +k8s:deepcopy-gen=true
@@ -190,17 +213,21 @@ type (
 		PerTryTimeout string
 	}
 
-	ExtAuthzPerRoute struct {
-		ext_authz.ExtAuthzPerRoute
+	DirectResponseAction struct {
+		Status uint32
 	}
+
+	ExtAuthzPerRoute = envoy_api.ExtAuthzPerRoute
 
 	CorsPolicy = envoy_api.CorsPolicy
 
 	// +k8s:deepcopy-gen=true
 	PerFilterConfig struct {
-		IpAllowDeny *IpAllowDeny      `json:"envoy.filters.http.ip_allow_deny,omitempty"`
-		HeaderSize  *HeaderSize       `json:"envoy.filters.http.header_size,omitempty"`
-		Authz       *ExtAuthzPerRoute `json:"envoy.filters.http.ext_authz,omitempty"`
+		IpAllowDeny         *IpAllowDeny         `json:"envoy.filters.http.ip_allow_deny,omitempty"`
+		HeaderSize          *HeaderSize          `json:"envoy.filters.http.header_size,omitempty"`
+		Authz               *ExtAuthzPerRoute    `json:"envoy.filters.http.ext_authz,omitempty"`
+		DynamicForwardProxy *DynamicForwardProxy `json:"envoy.filters.http.dynamic_forward_proxy,omitempty"`
+		Lua                 *LuaPerRoute         `json:"envoy.filters.http.lua,omitempty"`
 	}
 
 	// +k8s:deepcopy-gen=true
@@ -233,6 +260,19 @@ type (
 	// +k8s:deepcopy-gen=true
 	HeaderSizeSetting struct {
 		MaxBytes *int `json:"max_bytes,omitempty"`
+	}
+
+	DynamicForwardProxy struct {
+		DynamicForwardProxy DynamicForwardProxySetting `json:"dynamic_forward_proxy,omitempty"`
+	}
+
+	DynamicForwardProxySetting struct {
+		Name            string `json:"name,omitempty"`
+		DnsLookupFamily string `json:"dns_lookup_family,omitempty"`
+	}
+
+	LuaPerRoute struct {
+		lua.LuaPerRoute
 	}
 
 	// +k8s:deepcopy-gen=true
@@ -287,12 +327,14 @@ type (
 		Name                 string
 		Port                 int32
 		PortName             string
+		Protocol             string
 		Weight               *uint32
-		LbPolicy             cluster.Cluster_LbPolicy
+		LbPolicy             *cluster.Cluster_LbPolicy
 		LeastRequestLbConfig *LeastRequestLbConfig
-		IdleTimeout          time.Duration
+		IdleTimeout          time.Duration // "0" means unset; "< 0" means "no idle timeout" (e.g. infinity)
 		HealthCheck          *HealthCheck
 		ConnectTimeout       time.Duration
+		SlowStartConfig      *SlowStartConfig
 
 		// these settings are adjusted dynamically based on endpoint count
 		EndpointCircuitBreaker *EndpointCircuitBreaker
@@ -314,9 +356,10 @@ type (
 	}
 
 	// +k8s:deepcopy-gen=true
-	Delegate struct {
-		Name      string
-		Namespace string
+	SlowStartConfig struct {
+		SlowStartWindow  time.Duration
+		Aggression       float64
+		MinWeightPercent uint32 // Envoy 1.22+
 	}
 
 	IngressStatus interface {
@@ -336,6 +379,7 @@ type RoutesLongestFirst []*Route
 func (recv RoutesLongestFirst) Len() int {
 	return len(recv)
 }
+
 func (recv RoutesLongestFirst) Less(i, j int) bool {
 	// same length matches need to sort consistently
 	if len(recv[i].Match) == len(recv[j].Match) {
@@ -343,6 +387,7 @@ func (recv RoutesLongestFirst) Less(i, j int) bool {
 	}
 	return len(recv[i].Match) > len(recv[j].Match) // longest first
 }
+
 func (recv RoutesLongestFirst) Swap(i, j int) {
 	recv[i], recv[j] = recv[j], recv[i]
 }
@@ -352,11 +397,29 @@ type KVPByKey []KVP
 func (recv KVPByKey) Len() int {
 	return len(recv)
 }
+
 func (recv KVPByKey) Less(i, j int) bool {
 	return recv[i].Key < recv[j].Key
 }
+
 func (recv KVPByKey) Swap(i, j int) {
 	recv[i], recv[j] = recv[j], recv[i]
+}
+
+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
+func (in *LuaPerRoute) DeepCopyInto(out *LuaPerRoute) {
+	*out = *in
+	return
+}
+
+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VirtualHost.
+func (in *LuaPerRoute) DeepCopy() *LuaPerRoute {
+	if in == nil {
+		return nil
+	}
+	out := new(LuaPerRoute)
+	in.DeepCopyInto(out)
+	return out
 }
 
 // DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
@@ -460,25 +523,6 @@ func (recv *EndpointCircuitBreaker) maxRequests(endpoints uint32) *wrappers.UInt
 	}
 }
 
-func (recv *ExtAuthzPerRoute) MarshalJSON() ([]byte, error) {
-	return protojson.Marshal(&recv.ExtAuthzPerRoute)
-}
-
-func (recv *ExtAuthzPerRoute) UnmarshalJSON(bs []byte) error {
-	return protojson.Unmarshal(bs, &recv.ExtAuthzPerRoute)
-}
-
-func (recv *ExtAuthzPerRoute) DeepCopy() *ExtAuthzPerRoute {
-	eapr := new(ExtAuthzPerRoute)
-	eapr.DeepCopyInto(recv)
-	return eapr
-}
-
-func (in *ExtAuthzPerRoute) DeepCopyInto(out *ExtAuthzPerRoute) {
-	bs, _ := in.MarshalJSON()
-	json.Unmarshal(bs, out)
-}
-
 func (recv *Cluster) MatchServicePort(port k8s.ServicePort, protocol k8s.Protocol) bool {
 	if port.Protocol != protocol {
 		return false
@@ -486,6 +530,14 @@ func (recv *Cluster) MatchServicePort(port k8s.ServicePort, protocol k8s.Protoco
 	// one of Cluster.Port or Cluster.PortName will be set
 	// a K8s Service port number is always set (Name is optional if the Service only has 1 port)
 	return port.Port == recv.Port || (recv.PortName != "" && port.Name == recv.PortName)
+}
+
+func (recv *Cluster) tlsEnabled() bool {
+	return recv.Protocol == "tls" || recv.Protocol == "h2"
+}
+
+func (recv *Cluster) h2Enabled() bool {
+	return strings.Contains(recv.Protocol, "h2")
 }
 
 func (recv *Listener) ResolvedTCPProxy() (tcpProxy *TCPProxy) {
@@ -500,6 +552,35 @@ func (recv *Listener) ResolvedTCPProxy() (tcpProxy *TCPProxy) {
 		tcpProxy = recv.delegateTCPProxy
 	}
 	return
+}
+
+func (recv *Route) AuthEnabled() bool {
+	return recv.PerFilterConfig != nil && recv.PerFilterConfig.Authz != nil && !recv.PerFilterConfig.Authz.GetDisabled()
+}
+
+// SaveDelegatesChain adds another chain of delegates from a root ingress
+func (recv *Route) SaveDelegatesChain(ingress *Ingress, chain DelegatesChain) {
+	if recv.HasDelegatesChain(ingress, chain) {
+		return
+	}
+	if recv.DelegatesChains == nil {
+		recv.DelegatesChains = make(DelegatesChains)
+	}
+	recv.DelegatesChains[ingress] = append(recv.DelegatesChains[ingress], chain)
+}
+
+// HasDelegatesChain returns true if the chain is already present in the list of chains from a root ingress.
+func (recv *Route) HasDelegatesChain(ingress *Ingress, chain DelegatesChain) bool {
+	chains, ok := recv.DelegatesChains[ingress]
+	if !ok {
+		return false
+	}
+	for _, c := range chains {
+		if c.Equal(chain) {
+			return true
+		}
+	}
+	return false
 }
 
 func (recv *Ingress) SetValid() {
@@ -540,14 +621,21 @@ func (recv *Ingress) Validate() {
 			return
 		}
 		for _, route := range recv.VirtualHost.Routes {
-			if route.Match == "" && route.Path == "" {
-				recv.SetInvalid("Route has no Match or Path")
+			if route.Match == "" && route.Path == "" && route.Regex == "" && route.PathTemplate == "" && route.PathSeparatedPrefix == "" {
+				recv.SetInvalid("Route has no Match or Path or Regex or Path Template or Path Separated Prefix")
 				return
 			}
 
-			if len(route.Clusters) == 0 && route.Delegate == nil && route.Redirect == nil {
-				recv.SetInvalid("Route has no Clusters or Delegate or Redirect")
+			if len(route.Clusters) == 0 && route.Delegate == nil && route.Redirect == nil && route.DirectResponseAction == nil {
+				recv.SetInvalid("Route has no Clusters or Delegate or Redirect or DirectResponseAction")
 				return
+			}
+
+			if route.DirectResponseAction != nil {
+				if route.DirectResponseAction.Status == 0 {
+					recv.SetInvalid("DirectResponseAction: Must specify Status")
+					return
+				}
 			}
 
 			if route.Redirect != nil {
@@ -556,7 +644,7 @@ func (recv *Ingress) Validate() {
 					return
 				}
 			}
-			if route.PerFilterConfig != nil && route.PerFilterConfig.Authz != nil {
+			if recv.Fqdn != "" && route.AuthEnabled() {
 				switch {
 				case recv.Listener.TLS == nil:
 					recv.SetInvalid("cannot enable route authz on non tls listener")
@@ -625,7 +713,10 @@ func (recv *Ingress) IsClusterService() bool {
 
 // Analogous returns whether the given ingress represents
 // the same Ingress during CRD migration:
-//   i.e. same name, same namespace, same fqdn but different type
+//
+//	i.e. same name, same namespace, same fqdn, same class but different type
+//	-- or --
+//	same fqdn same guid annotation (across namespace)
 func (recv *Ingress) Analogous(ingress *Ingress) (akin bool) {
 	if !config.EnableCRDMigration() {
 		return
@@ -636,10 +727,26 @@ func (recv *Ingress) Analogous(ingress *Ingress) (akin bool) {
 		return
 	}
 
+	// an ingress cannot be analogous to itself
+	if ingress == recv {
+		return
+	}
+	if ingress.Name == recv.Name &&
+		ingress.Namespace == recv.Namespace &&
+		ingress.TypeURL == recv.TypeURL {
+		return
+	}
+
 	if ingress.Name == recv.Name &&
 		ingress.Namespace == recv.Namespace &&
 		ingress.Fqdn == recv.Fqdn &&
+		ingress.Class == recv.Class &&
 		ingress.TypeURL != recv.TypeURL {
+		akin = true
+	} else if ingress.Fqdn == recv.Fqdn &&
+		ingress.Class == recv.Class &&
+		ingress.MigrationID != uuid.Nil &&
+		ingress.MigrationID == recv.MigrationID {
 		akin = true
 	}
 	return

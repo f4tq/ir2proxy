@@ -28,5 +28,6 @@ const (
 	ServiceId    = "adobe.serviceid"
 
 	// for migration between CRDs
-	Priority = "kapcom.adobe.io/priority"
+	Priority    = "kapcom.adobe.io/priority"
+	MigrationID = "kapcom.adobe.io/migration-id"
 )

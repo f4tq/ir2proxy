@@ -16,9 +16,11 @@ import (
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	envoy_extensions_upstream_http_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	envoy_type "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/golang/protobuf/ptypes"
+	"github.com/golang/protobuf/ptypes/any"
 	"github.com/golang/protobuf/ptypes/duration"
 	"github.com/golang/protobuf/ptypes/wrappers"
 	"gopkg.in/inconshreveable/log15.v2"
@@ -54,6 +56,13 @@ func defaultCount(default_, val uint32) *wrappers.UInt32Value {
 	return &wrappers.UInt32Value{Value: default_}
 }
 
+func defaultClusterLbPolicy() (policy cluster.Cluster_LbPolicy) {
+	if clbp := ClusterLbPolicy(config.DefaultLbPolicy()); clbp != nil {
+		policy = *clbp
+	}
+	return policy
+}
+
 func llbEndpoints(address string, port uint32) []*endpoint.LocalityLbEndpoints {
 	return []*endpoint.LocalityLbEndpoints{
 		{
@@ -79,14 +88,32 @@ func llbEndpoints(address string, port uint32) []*endpoint.LocalityLbEndpoints {
 	}
 }
 
+func grpcCluster(log log15.Logger, clusterName string, grpcLogger *GRPCLogger) xds.Wrapper {
+	cr := &cluster.Cluster{
+		Name:                          clusterName,
+		ConnectTimeout:                ptypes.DurationProto(100 * time.Millisecond),
+		TypedExtensionProtocolOptions: http2ProtocolOptions(log),
+		ClusterDiscoveryType: &cluster.Cluster_Type{
+			// ensure traffic is evenly distributed to gRPC ALSes
+			Type: cluster.Cluster_STRICT_DNS,
+		},
+		LoadAssignment: &endpoint.ClusterLoadAssignment{
+			ClusterName: clusterName,
+			Endpoints:   llbEndpoints(grpcLogger.Host, uint32(grpcLogger.Port)),
+		},
+	}
+
+	return xds.NewWrapper(cr)
+}
+
 func (recv *CRDHandler) mutateTransportSocket(cl *cluster.Cluster) {
 	if !config.MTLS() {
 		return
 	}
-	if cl.Http2ProtocolOptions == nil {
+	if cl.TypedExtensionProtocolOptions == nil {
 		// cluster services are grpc which requires h2
 		// make sure it's on but accepting what's provided otherwise
-		cl.Http2ProtocolOptions = &core.Http2ProtocolOptions{}
+		cl.TypedExtensionProtocolOptions = http2ProtocolOptions(recv.log)
 	}
 	utc := &tls.UpstreamTlsContext{
 		CommonTlsContext: &tls.CommonTlsContext{
@@ -107,8 +134,20 @@ func (recv *CRDHandler) mutateTransportSocket(cl *cluster.Cluster) {
 	}
 }
 
-func mutateClusterByRole(log log15.Logger, mci mutateClusterInput) {
+func http2ProtocolOptions(log log15.Logger) map[string]*any.Any {
+	return map[string]*any.Any{
+		constants.HttpProtocolOptionsExtension: util.ToAny(log,
+			&envoy_extensions_upstream_http_v3.HttpProtocolOptions{
+				UpstreamProtocolOptions: &envoy_extensions_upstream_http_v3.HttpProtocolOptions_ExplicitHttpConfig_{
+					ExplicitHttpConfig: &envoy_extensions_upstream_http_v3.HttpProtocolOptions_ExplicitHttpConfig{
+						ProtocolConfig: &envoy_extensions_upstream_http_v3.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{},
+					},
+				},
+			}),
+	}
+}
 
+func mutateClusterByRole(log log15.Logger, mci mutateClusterInput) {
 	role := mci.role
 	clusterName := mci.clusterName
 	externalName := mci.externalName
@@ -130,7 +169,7 @@ func mutateClusterByRole(log log15.Logger, mci mutateClusterInput) {
 			}
 		} else {
 			c.ClusterDiscoveryType = &cluster.Cluster_Type{
-				Type: cluster.Cluster_STRICT_DNS,
+				Type: cluster.Cluster_LOGICAL_DNS,
 			}
 
 			c.LoadAssignment = &endpoint.ClusterLoadAssignment{
@@ -210,12 +249,16 @@ func mutateClusterByRole(log log15.Logger, mci mutateClusterInput) {
 			c.TransportSocket = &core.TransportSocket{
 				Name: wellknown.TransportSocketTls,
 				ConfigType: &core.TransportSocket_TypedConfig{
-					util.ToAny(log, utc),
+					TypedConfig: util.ToAny(log, utc),
 				},
 			}
 		}
 
-		c.LbPolicy = xCluster.LbPolicy
+		if xCluster.LbPolicy != nil {
+			c.LbPolicy = *xCluster.LbPolicy
+		} else {
+			c.LbPolicy = defaultClusterLbPolicy()
+		}
 		if xCluster.LeastRequestLbConfig != nil {
 			c.LbConfig = &cluster.Cluster_LeastRequestLbConfig_{
 				LeastRequestLbConfig: &cluster.Cluster_LeastRequestLbConfig{
@@ -224,17 +267,70 @@ func mutateClusterByRole(log log15.Logger, mci mutateClusterInput) {
 			}
 		}
 
+		if xCluster.SlowStartConfig != nil {
+			slowStartConfig := &cluster.Cluster_SlowStartConfig{
+				SlowStartWindow: ptypes.DurationProto(xCluster.SlowStartConfig.SlowStartWindow),
+				Aggression: &core.RuntimeDouble{
+					DefaultValue: xCluster.SlowStartConfig.Aggression,
+					RuntimeKey:   "slowstart.aggression",
+				},
+				MinWeightPercent: &envoy_type.Percent{
+					Value: float64(xCluster.SlowStartConfig.MinWeightPercent),
+				},
+			}
+			switch c.LbPolicy {
+			case cluster.Cluster_ROUND_ROBIN:
+				c.LbConfig = &cluster.Cluster_RoundRobinLbConfig_{
+					RoundRobinLbConfig: &cluster.Cluster_RoundRobinLbConfig{
+						SlowStartConfig: slowStartConfig,
+					},
+				}
+			case cluster.Cluster_LEAST_REQUEST:
+				if lbc := c.GetLeastRequestLbConfig(); lbc != nil {
+					lbc.SlowStartConfig = slowStartConfig
+				} else {
+					c.LbConfig = &cluster.Cluster_LeastRequestLbConfig_{
+						LeastRequestLbConfig: &cluster.Cluster_LeastRequestLbConfig{
+							SlowStartConfig: slowStartConfig,
+						},
+					}
+				}
+			}
+		}
+
 		// TODO(bcook) for mTLS this needs to be dynamic and less than the
 		// Sidecar's --drain-time-s to avoid the issue described in
 		// https://medium.com/@phylake/why-idle-timeouts-matter-1b3f7d4469fe?sk=9915bbe0200185e6929e942f289abf08
-		if xCluster.IdleTimeout == 0 {
-			c.CommonHttpProtocolOptions = &core.HttpProtocolOptions{
-				IdleTimeout: ptypes.DurationProto(58 * time.Second),
+		hpo := new(envoy_extensions_upstream_http_v3.HttpProtocolOptions)
+		if c.TypedExtensionProtocolOptions[constants.HttpProtocolOptionsExtension] != nil {
+			err := c.GetTypedExtensionProtocolOptions()[constants.HttpProtocolOptionsExtension].UnmarshalTo(hpo)
+
+			if err != nil {
+				log.Error("TypedExtensionProtocolOptions Unmarshalling error", "Error", err)
 			}
 		} else {
-			c.CommonHttpProtocolOptions = &core.HttpProtocolOptions{
+			hpo = &envoy_extensions_upstream_http_v3.HttpProtocolOptions{}
+			hpo.UpstreamProtocolOptions = &envoy_extensions_upstream_http_v3.HttpProtocolOptions_ExplicitHttpConfig_{
+				ExplicitHttpConfig: &envoy_extensions_upstream_http_v3.HttpProtocolOptions_ExplicitHttpConfig{
+					ProtocolConfig: &envoy_extensions_upstream_http_v3.HttpProtocolOptions_ExplicitHttpConfig_HttpProtocolOptions{},
+				},
+			}
+		}
+		if xCluster.IdleTimeout == 0 {
+			hpo.CommonHttpProtocolOptions = &core.HttpProtocolOptions{
+				IdleTimeout: ptypes.DurationProto(58 * time.Second),
+			}
+		} else if xCluster.IdleTimeout < 0 {
+			hpo.CommonHttpProtocolOptions = &core.HttpProtocolOptions{
+				IdleTimeout: ptypes.DurationProto(0 * time.Second),
+			}
+		} else {
+			hpo.CommonHttpProtocolOptions = &core.HttpProtocolOptions{
 				IdleTimeout: ptypes.DurationProto(xCluster.IdleTimeout),
 			}
+		}
+		c.TypedExtensionProtocolOptions = map[string]*any.Any{
+			constants.HttpProtocolOptionsExtension: util.ToAny(log, hpo),
 		}
 
 		if hc := xCluster.HealthCheck; hc != nil {
@@ -296,7 +392,6 @@ func mutateClusterByRole(log log15.Logger, mci mutateClusterInput) {
 }
 
 func mutateCluster(log log15.Logger, mci mutateClusterInput) {
-
 	c := mci.c
 	h2 := mci.h2
 
@@ -304,15 +399,15 @@ func mutateCluster(log log15.Logger, mci mutateClusterInput) {
 	c.AltStatName = mci.altStatName
 
 	if h2 {
-		c.Http2ProtocolOptions = &core.Http2ProtocolOptions{}
+		c.TypedExtensionProtocolOptions = http2ProtocolOptions(log)
 	}
 
 	mutateClusterByRole(log, mci)
 }
 
 func (recv *CRDHandler) createClusters(sotw SotW, ingress *Ingress,
-	clusters []Cluster, mtlsH2 bool) (shouldUpdateCDS bool) {
-
+	clusters []Cluster, mtlsH2 bool,
+) (shouldUpdateCDS bool) {
 	nsCRDs := recv.getNS(ingress.Namespace)
 
 	for _, xCluster := range clusters {
@@ -343,14 +438,14 @@ func (recv *CRDHandler) createClusters(sotw SotW, ingress *Ingress,
 
 			_, h2Port := h2Ports[strconv.FormatInt(int64(kServicePort.Port), 10)]
 			_, h2Name := h2Ports[kServicePort.Name]
-			h2 := h2Port || h2Name
+			h2 := xCluster.h2Enabled() || h2Port || h2Name
 			if ingress.IsClusterService() {
 				h2 = true
 			}
 
 			_, tlsPort := tlsPorts[strconv.FormatInt(int64(kServicePort.Port), 10)]
 			_, tlsName := tlsPorts[kServicePort.Name]
-			tls := tlsPort || tlsName
+			tls := xCluster.tlsEnabled() || tlsPort || tlsName
 
 			clusterName := ClusterName(&xCluster, kService, &kServicePort)
 			altStatName := AltStatName(kService, &kServicePort)
@@ -390,6 +485,21 @@ func (recv *CRDHandler) createClusters(sotw SotW, ingress *Ingress,
 			}
 		}
 	}
+
+	if RequiresAuthzFilter(ingress) {
+		// create some additional, predefined clusters for rewrites when the external authz is enabled
+		for _, dynCluster := range GetAuthzRewriteClusters(recv.log) {
+			if _, exists := sotw.cds[dynCluster.Name]; !exists {
+				wrapper := xds.NewWrapper(&cluster.Cluster{})
+				sotw.cds[dynCluster.Name] = wrapper
+
+				if wrapper.CompareAndReplace(recv.log, dynCluster) {
+					shouldUpdateCDS = true
+				}
+			}
+		}
+	}
+
 	return
 }
 
@@ -401,94 +511,48 @@ func (recv *CRDHandler) handleMiscClusters(ingress *Ingress, sotw SotW, shouldUp
 		}
 	}
 
-	if recv.rateLimitCluster != nil {
-		if sotw.sidecar == nil {
-			// gw side ratelimit cluster
-			if _, exists := sotw.cds[RatelimitClusterName()]; !exists {
-
-				// TODO(fortesque) reenable
-				// if recv.canMTLS() && RateLimitInternalMTLS() {
-				// 	rlCluster := RateLimitCluster()
-				// 	recv.mutateTransportSocket(rlCluster)
-				// }
-				sotw.cds[RatelimitClusterName()] = recv.rateLimitCluster
-				*shouldUpdateCDS = true
-			}
-		}
-	}
-
-	if recv.authzCluster != nil {
-		if sotw.sidecar == nil {
-			// gw side authz cluster
-			if _, exists := sotw.cds[AuthzClusterName()]; !exists {
-				// TODO(fortesque) reenable
-				// if recv.canMTLS() && AuthzInternalMTLS() {
-				// 	authzCluster := AuthzCluster()
-				// 	recv.mutateTransportSocket(authzCluster)
-				// }
-				sotw.cds[AuthzClusterName()] = recv.authzCluster
-				*shouldUpdateCDS = true
-			}
-		}
-	}
-
-	if sotw.sidecar != nil && sotw.sidecar.Spec.Filters.ExtAuthz != nil {
-		// TODO: @bcook: do we still have a need for sidecar defined authz?
-		//    it would be recursive if gw authz were on too
-		if _, exists := sotw.cds[constants.ExtAuthzCluster]; !exists {
-			cr := &cluster.Cluster{
-				Name:                 constants.ExtAuthzCluster,
-				ConnectTimeout:       ptypes.DurationProto(10 * time.Millisecond),
-				Http2ProtocolOptions: &core.Http2ProtocolOptions{},
-				ClusterDiscoveryType: &cluster.Cluster_Type{
-					Type: cluster.Cluster_STRICT_DNS,
-				},
-				LbPolicy: cluster.Cluster_RANDOM,
-				LoadAssignment: &endpoint.ClusterLoadAssignment{
-					ClusterName: constants.ExtAuthzCluster,
-					Endpoints: llbEndpoints(
-						sotw.sidecar.Spec.Filters.ExtAuthz.GrpcService.SocketAddress.Address,
-						uint32(sotw.sidecar.Spec.Filters.ExtAuthz.GrpcService.SocketAddress.PortValue),
-					),
-				},
-			}
-			// TODO(fortesque) reenable
-			// recv.mutateTransportSocket(cluster)
-			sotw.cds[constants.ExtAuthzCluster] = xds.NewWrapper(cr)
+	if sotw.role == GatewayRole && recv.rateLimitCluster != nil {
+		if _, exists := sotw.cds[RatelimitClusterName()]; !exists {
+			sotw.cds[RatelimitClusterName()] = recv.rateLimitCluster
 			*shouldUpdateCDS = true
 		}
 	}
 
-	if len(ingress.VirtualHost.Logging.Loggers) > 0 && config.GrpcAlsEnabled() {
+	if sotw.role == GatewayRole && recv.authzCluster != nil {
+		if _, exists := sotw.cds[AuthzClusterName()]; !exists {
+			sotw.cds[AuthzClusterName()] = recv.authzCluster
+			*shouldUpdateCDS = true
+		}
+	}
+
+	if config.GrpcAlsEnabled() && len(ingress.VirtualHost.Logging.Loggers) > 0 {
 		if grpcLogger := ingress.VirtualHost.Logging.Loggers[0].GRPC; grpcLogger != nil {
 
 			clusterName := GRPCClusterName(grpcLogger)
 
 			if _, exists := sotw.cds[clusterName]; !exists {
-
-				cr := &cluster.Cluster{
-					Name:                 clusterName,
-					ConnectTimeout:       ptypes.DurationProto(10 * time.Millisecond),
-					Http2ProtocolOptions: &core.Http2ProtocolOptions{},
-					ClusterDiscoveryType: &cluster.Cluster_Type{
-						// ensure traffic is evenly distributed to gRPC ALSes
-						Type: cluster.Cluster_STRICT_DNS,
-					},
-					LoadAssignment: &endpoint.ClusterLoadAssignment{
-						ClusterName: clusterName,
-						Endpoints:   llbEndpoints(grpcLogger.Host, uint32(grpcLogger.Port)),
-					},
-				}
-
-				sotw.cds[clusterName] = xds.NewWrapper(cr)
+				sotw.cds[clusterName] = grpcCluster(recv.log, clusterName, grpcLogger)
 				*shouldUpdateCDS = true
 			}
+		}
+	}
+
+	if config.GrpcAlsEnabled() && config.GrpcAlsGlobalHost() != "" && config.GrpcAlsGlobalPort() > 0 {
+		grpcLogger := &GRPCLogger{
+			Host: config.GrpcAlsGlobalHost(),
+			Port: config.GrpcAlsGlobalPort(),
+		}
+
+		clusterName := GRPCClusterName(grpcLogger)
+
+		if _, exists := sotw.cds[clusterName]; !exists {
+			sotw.cds[clusterName] = grpcCluster(recv.log, clusterName, grpcLogger)
+			*shouldUpdateCDS = true
 		}
 	}
 }
 
 func (recv *CRDHandler) updateCDS(ns, name string) {
-
 	for _, ingress := range recv.getIngressList(ns, name) {
 
 		// if an Ingress was previously valid we leave the CDS entries intact since

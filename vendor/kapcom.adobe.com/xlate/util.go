@@ -5,11 +5,13 @@ import (
 	"encoding/gob"
 	"fmt"
 	"hash/crc32"
+	"path"
 	"strconv"
 	"strings"
 
 	"kapcom.adobe.com/constants"
 
+	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	k8s "k8s.io/api/core/v1"
 )
@@ -86,6 +88,22 @@ func TLSProtocolVersion(version string) (bool, tls.TlsParameters_TlsProtocol) {
 	return ret, tlsVersion
 }
 
+func ClusterLbPolicy(policy string) (clusterLbPolicy *cluster.Cluster_LbPolicy) {
+	switch policy {
+	case "WeightedLeastRequest":
+		clusterLbPolicy = cluster.Cluster_LEAST_REQUEST.Enum()
+	case "Random":
+		clusterLbPolicy = cluster.Cluster_RANDOM.Enum()
+	case "RingHash":
+		clusterLbPolicy = cluster.Cluster_RING_HASH.Enum()
+	case "Maglev":
+		clusterLbPolicy = cluster.Cluster_MAGLEV.Enum()
+	case "RoundRobin":
+		clusterLbPolicy = cluster.Cluster_ROUND_ROBIN.Enum()
+	}
+	return clusterLbPolicy
+}
+
 func arr2map(arr []string) map[string]struct{} {
 	ret := make(map[string]struct{})
 	for _, elem := range arr {
@@ -94,4 +112,24 @@ func arr2map(arr []string) map[string]struct{} {
 		}
 	}
 	return ret
+}
+
+// JoinPath joins two paths (preserving the trailing slash if present)
+func JoinPath(a, b string) string {
+	// some special cases
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+
+	res := path.Join(a, b)
+
+	// make sure we preserve the trailing slash if b had one
+	if strings.HasSuffix(b, "/") && !strings.HasSuffix(res, "/") {
+		res += "/"
+	}
+
+	return res
 }
