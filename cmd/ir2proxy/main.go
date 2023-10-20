@@ -16,7 +16,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strings"
 
@@ -48,11 +47,10 @@ func run() int {
 	args := os.Args[1:]
 	kingpin.MustParse(app.Parse(args))
 
-	data, err := ioutil.ReadFile(*yamlfile)
+	data, err := os.ReadFile(*yamlfile)
 	if err != nil {
 		log.Error(err)
 	}
-
 	for _, yamldoc := range splitYAML(data) {
 		ir, err := k8sdecoder.DecodeIngressRoute(yamldoc)
 		if err != nil {
@@ -89,7 +87,6 @@ func run() int {
 		outputWarnings := commentedWarnings(warnings)
 		fmt.Printf("---\n%s\n%s", outputWarnings, outputYAML)
 	}
-
 	return 0
 }
 
